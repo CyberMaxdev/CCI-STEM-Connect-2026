@@ -1,0 +1,6 @@
+{
+  "name": "CCI STEM Connect",
+  "description": "Centralised programme management, participant development, performance measurement, and impact intelligence platform for the CCI STEM Connect Programme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
