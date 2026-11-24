@@ -1,10 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Award, CheckCircle2, Download, Plus, ShieldCheck, X, XCircle } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import {
+  AlertCircle,
+  Award,
+  CheckCircle2,
+  Download,
+  FileDown,
+  Plus,
+  X,
+} from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { downloadCertificatePdf, downloadCsv } from '../lib/export-utils';
 
-interface CertificateTemplateItem {
+interface TemplateItem {
   id: string;
   programmeId?: string;
   title: string;
@@ -40,142 +47,133 @@ interface EligibilityRow {
   } | null;
 }
 
-interface ParticipantCertBundle {
-  template: CertificateTemplateItem;
-  programmeTitle: string;
-  programmeCode: string;
-  evaluation: EligibilityRow | null;
-}
-
 interface CertificatesResponse {
-  scope: string;
+  scope: 'participant' | 'super_admin' | 'programme_manager';
   programme?: { id: string; code: string; title: string };
-  templates: CertificateTemplateItem[];
+  templates: TemplateItem[];
   activeTemplateId?: string | null;
   eligibilityRows: EligibilityRow[];
-  myCertificates?: ParticipantCertBundle[];
+  myCertificates?: Array<{
+    template: TemplateItem;
+    programmeTitle: string;
+    programmeCode: string;
+    evaluation: EligibilityRow | null;
+  }>;
   filterOptions: {
     programmes: Array<{ id: string; code: string; title: string }>;
   };
 }
 
 export function CertificatesPage() {
-  const { user } = useAuth();
-  const isParticipant = user?.role === 'participant';
-
   const [programmeId, setProgrammeId] = useState('');
   const [templateId, setTemplateId] = useState('');
   const [data, setData] = useState<CertificatesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [issuingIds, setIssuingIds] = useState<string[]>([]);
+  const [issuing, setIssuing] = useState(false);
 
-  // Template Modal State
+  // Create Template Modal
   const [showTemplateModal, setShowTemplateModal] = useState(false);
-  const [tplTitle, setTplTitle] = useState('Certificate of Completion & STEM Achievement');
-  const [tplMinAttendance, setTplMinAttendance] = useState('75');
+  const [tplTitle, setTplTitle] = useState('Certificate of STEM Excellence & Completion');
+  const [tplMinAtt, setTplMinAtt] = useState('75');
   const [tplMinScore, setTplMinScore] = useState('55');
-  const [tplRequireAss, setTplRequireAss] = useState(true);
-  const [tplRequireComp, setTplRequireComp] = useState(true);
+  const [tplReqAssessments, setTplReqAssessments] = useState(true);
+  const [tplReqCompletion, setTplReqCompletion] = useState(true);
   const [tplSignatoryName, setTplSignatoryName] = useState('CCI STEM Connect Programme Director');
   const [tplSignatoryTitle, setTplSignatoryTitle] = useState('Celebration Church International');
-  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [creatingTpl, setCreatingTpl] = useState(false);
 
-  const loadCertificates = useCallback(
-    async (progId: string, tplId: string) => {
+  const showToast = (msg: string) => {
+    setNotice(msg);
+    setTimeout(() => setNotice(null), 4500);
+  };
+
+  const loadData = useCallback(async (progId: string, tplId: string) => {
+    try {
       setLoading(true);
       setError(null);
-      try {
-        const qs = new URLSearchParams();
-        if (!isParticipant && progId) qs.set('programmeId', progId);
-        if (!isParticipant && tplId) qs.set('templateId', tplId);
-        const res = await apiFetch<CertificatesResponse>(
-          `/api/certificates${qs.toString() ? `?${qs}` : ''}`
-        );
-        setData(res);
-        if (!isParticipant) {
-          if (!progId && res.programme?.id) setProgrammeId(res.programme.id);
-          if (res.activeTemplateId && res.activeTemplateId !== tplId) {
-            setTemplateId(res.activeTemplateId);
-          }
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to load certificates.');
-      } finally {
-        setLoading(false);
+      const params = new URLSearchParams();
+      if (progId) params.set('programmeId', progId);
+      if (tplId) params.set('templateId', tplId);
+      const query = params.toString() ? `?${params.toString()}` : '';
+      const res = await apiFetch<CertificatesResponse>(`/api/certificates${query}`);
+      setData(res);
+      if (!progId && res.programme?.id) {
+        setProgrammeId(res.programme.id);
       }
-    },
-    [isParticipant]
-  );
+      if (res.activeTemplateId && res.activeTemplateId !== tplId) {
+        setTemplateId(res.activeTemplateId);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load certificate records.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    loadCertificates(programmeId, templateId);
-  }, [programmeId, templateId, loadCertificates]);
+    loadData(programmeId, templateId);
+  }, [programmeId, templateId, loadData]);
 
   const activeTemplate = data?.templates.find((t) => t.id === (templateId || data.activeTemplateId));
 
   const handleCreateTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!programmeId) return;
-    setSavingTemplate(true);
-    setError(null);
-    setNotice(null);
     try {
+      setCreatingTpl(true);
+      setError(null);
       const res = await apiFetch<{ template: { id: string } }>('/api/certificates/templates', {
         method: 'POST',
         body: {
           programmeId,
           title: tplTitle.trim(),
-          minAttendancePct: Number(tplMinAttendance) || 0,
-          minOverallScore: Number(tplMinScore) || 0,
-          requireAllAssessments: tplRequireAss,
-          requireProgrammeCompletion: tplRequireComp,
+          minAttendancePct: Number(tplMinAtt),
+          minOverallScore: Number(tplMinScore),
+          requireAllAssessments: tplReqAssessments,
+          requireProgrammeCompletion: tplReqCompletion,
           signatoryName: tplSignatoryName.trim(),
           signatoryTitle: tplSignatoryTitle.trim(),
         },
       });
       setShowTemplateModal(false);
       setTemplateId(res.template.id);
-      setNotice('Certificate template saved with live eligibility rules.');
-      await loadCertificates(programmeId, res.template.id);
+      showToast('Certificate template configured and eligibility rules evaluated.');
+      await loadData(programmeId, res.template.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to create certificate template.');
     } finally {
-      setSavingTemplate(false);
+      setCreatingTpl(false);
     }
   };
 
   const handleIssue = async (participantIds: string[]) => {
     if (!activeTemplate || participantIds.length === 0) return;
-    setIssuingIds(participantIds);
-    setError(null);
-    setNotice(null);
     try {
-      const res = await apiFetch<{
-        issuedCount: number;
-        skipped: Array<{ fullName: string; reason: string }>;
-      }>('/api/certificates/issue', {
+      setIssuing(true);
+      setError(null);
+      const res = await apiFetch<{ issuedCount: number }>('/api/certificates/issue', {
         method: 'POST',
         body: {
           templateId: activeTemplate.id,
           participantIds,
         },
       });
-      setNotice(
-        `Issued ${res.issuedCount} verifiable certificate${res.issuedCount === 1 ? '' : 's'}.`
+      showToast(
+        `Issued ${res.issuedCount} official certificate${res.issuedCount === 1 ? '' : 's'} with unique verification codes.`
       );
-      await loadCertificates(programmeId, activeTemplate.id);
+      await loadData(programmeId, activeTemplate.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to issue certificates.');
     } finally {
-      setIssuingIds([]);
+      setIssuing(false);
     }
   };
 
-  const handleDownloadPdf = (
+  const triggerPdfDownload = (
     row: EligibilityRow,
-    template: CertificateTemplateItem,
+    template: TemplateItem,
     progTitle: string,
     progCode: string
   ) => {
@@ -198,183 +196,245 @@ export function CertificatesPage() {
     });
   };
 
-  const handleExportCsv = () => {
-    if (!data?.programme || !activeTemplate) return;
+  const handleExportEligibilityCsv = () => {
+    if (!data || !activeTemplate) return;
     downloadCsv(
-      `CCI-Certificates-${data.programme.code}.csv`,
+      `CCI-Certificate-Eligibility-${data.programme?.code || 'Programme'}.csv`,
       [
-        'Participant ID',
+        'Participant Code',
         'Full Name',
         'Cohort',
+        'STEM Track',
         'Status',
-        'Attendance (%)',
-        'Weighted Score (%)',
-        'Assessments',
+        'Attendance %',
+        'Weighted Score %',
+        'Standing',
+        'Assessments Graded',
+        'Required Assessments',
         'Eligible',
         'Certificate Code',
-        'Issued Date',
-        'Unmet Criteria',
+        'Unmet Requirements',
       ],
       data.eligibilityRows.map((r) => [
         r.participantCode,
         r.fullName,
         r.cohortName,
+        r.trackName ?? '',
         r.participantStatus,
-        r.attendanceRate ?? '',
-        r.overallScore ?? '',
-        `${r.gradedAssessments}/${r.requiredAssessments}`,
+        r.attendanceRate !== null ? r.attendanceRate : '',
+        r.overallScore !== null ? r.overallScore : '',
+        r.classification,
+        r.gradedAssessments,
+        r.requiredAssessments,
         r.eligible ? 'Yes' : 'No',
         r.issuedCertificate?.certificateCode ?? '',
-        r.issuedCertificate ? new Date(r.issuedCertificate.issuedAt).toISOString().slice(0, 10) : '',
         r.reasons.join('; '),
       ])
     );
   };
 
-  // Participant Self-Service View
-  if (isParticipant) {
-    const items = data?.myCertificates ?? [];
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="h-10 w-64 bg-slate-100 rounded animate-pulse" />
+        <div className="h-48 bg-white border border-slate-200 rounded-xl animate-pulse" />
+      </div>
+    );
+  }
+
+  // PARTICIPANT VIEW
+  if (data?.scope === 'participant') {
+    const items = data.myCertificates ?? [];
     return (
       <div className="space-y-6">
         <div>
-          <h2 className="text-xl font-semibold text-slate-900">My Certificates & Eligibility</h2>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Track your graduation criteria and download your official verifiable CCI STEM Connect PDF certificate once issued.
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+            My Certificates & Eligibility
+          </h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Track your certificate eligibility criteria and download official CCI STEM Connect PDF
+            certificates once issued.
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-[#8F0E15]">
-            {error}
+          <div
+            role="alert"
+            className="p-3.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-sm flex items-center gap-2.5"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+            <span>{error}</span>
           </div>
         )}
 
-        {loading ? (
-          <div className="h-44 bg-white border border-slate-200 rounded-xl animate-pulse" />
-        ) : items.length === 0 ? (
-          <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
-            <Award className="w-9 h-9 text-slate-300 mx-auto mb-2" />
-            <p className="text-sm font-medium text-slate-800">No certificates configured yet</p>
-            <p className="text-xs text-slate-500 mt-1">
-              Once your Programme Manager publishes a certificate template for your programme, your live eligibility status will appear here.
+        {items.length === 0 ? (
+          <div className="bg-white rounded-xl border border-slate-200 p-10 text-center">
+            <Award className="w-9 h-9 text-slate-300 mx-auto" />
+            <p className="mt-3 text-sm font-medium text-slate-800">
+              No certificates configured for your programme yet
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              Your Programme Manager will configure completion criteria and issue official
+              certificates at programme conclusion.
             </p>
           </div>
         ) : (
           <div className="space-y-4">
-            {items.map((item) => {
-              const ev = item.evaluation;
-              return (
-                <div
-                  key={item.template.id}
-                  className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
-                >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                      <p className="text-xs text-slate-500">
-                        {item.programmeCode} · {item.programmeTitle}
-                      </p>
-                      <h3 className="text-lg font-semibold text-slate-900 mt-0.5">
-                        {item.template.title}
-                      </h3>
-                    </div>
-
-                    {ev?.issuedCertificate ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDownloadPdf(ev, item.template, item.programmeTitle, item.programmeCode)
-                        }
-                        className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap shrink-0"
-                      >
-                        <Download className="w-4 h-4" />
-                        Download Official PDF
-                      </button>
-                    ) : (
-                      <span
-                        className={`text-sm font-medium ${
-                          ev?.eligible ? 'text-teal-700' : 'text-slate-600'
-                        }`}
-                      >
-                        {ev?.eligible ? 'Eligible — Awaiting Issuance' : 'Criteria In Progress'}
-                      </span>
-                    )}
+            {items.map(({ template, programmeTitle, programmeCode, evaluation }) => (
+              <section
+                key={template.id}
+                className="bg-white rounded-xl border border-slate-200 p-6 space-y-4"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 pb-4 border-b border-slate-100">
+                  <div>
+                    <p className="text-xs text-slate-500">
+                      {programmeCode} — {programmeTitle}
+                    </p>
+                    <h3 className="mt-1 text-lg font-bold text-slate-900">{template.title}</h3>
                   </div>
 
-                  {ev && (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-3 border-t border-slate-100 text-sm tabular-nums">
-                      <div>
-                        <p className="text-xs text-slate-500">Attendance</p>
-                        <p className="font-semibold text-slate-900">
-                          {ev.attendanceRate !== null ? `${ev.attendanceRate}%` : '—'}{' '}
-                          <span className="text-xs font-normal text-slate-500">
-                            (min {item.template.minAttendancePct}%)
-                          </span>
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-500">Weighted Score</p>
-                        <p className="font-semibold text-slate-900">
-                          {ev.overallScore !== null ? `${ev.overallScore}%` : 'Withheld'}{' '}
-                          <span className="text-xs font-normal text-slate-500">
-                            (min {item.template.minOverallScore}%)
-                          </span>
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-500">Assessments</p>
-                        <p className="font-semibold text-slate-900">
-                          {ev.gradedAssessments} / {ev.requiredAssessments}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-500">Verification Code</p>
-                        <p className="font-mono text-xs font-semibold text-slate-900 mt-0.5">
-                          {ev.issuedCertificate?.certificateCode ?? 'Not issued yet'}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {ev && ev.reasons.length > 0 && (
-                    <div className="p-3.5 bg-slate-50 rounded-lg text-xs text-slate-700 space-y-1">
-                      <p className="font-semibold text-slate-900">Remaining Eligibility Requirements:</p>
-                      <ul className="list-disc pl-4 space-y-0.5">
-                        {ev.reasons.map((r, i) => (
-                          <li key={i}>{r}</li>
-                        ))}
-                      </ul>
-                    </div>
+                  {evaluation?.issuedCertificate ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        triggerPdfDownload(evaluation, template, programmeTitle, programmeCode)
+                      }
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Download className="w-4 h-4 shrink-0" />
+                      <span>Download Official PDF Certificate</span>
+                    </button>
+                  ) : (
+                    <span
+                      className={`text-xs font-semibold ${
+                        evaluation?.eligible ? 'text-teal-700' : 'text-amber-700'
+                      }`}
+                    >
+                      {evaluation?.eligible
+                        ? 'Eligible — Awaiting Issuance'
+                        : 'Requirements In Progress'}
+                    </span>
                   )}
                 </div>
-              );
-            })}
+
+                {evaluation && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm font-mono tabular-nums">
+                    <div>
+                      <p className="text-xs font-sans text-slate-500">Attendance</p>
+                      <p className="mt-0.5 font-semibold text-slate-900">
+                        {evaluation.attendanceRate !== null ? `${evaluation.attendanceRate}%` : '—'}{' '}
+                        <span className="text-xs font-normal text-slate-400">
+                          / {template.minAttendancePct}% min
+                        </span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-sans text-slate-500">Weighted Score</p>
+                      <p className="mt-0.5 font-semibold text-slate-900">
+                        {evaluation.overallScore !== null ? `${evaluation.overallScore}%` : '—'}{' '}
+                        <span className="text-xs font-normal text-slate-400">
+                          / {template.minOverallScore}% min
+                        </span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-sans text-slate-500">Assessments</p>
+                      <p className="mt-0.5 font-semibold text-slate-900">
+                        {evaluation.gradedAssessments}/{evaluation.requiredAssessments}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-sans text-slate-500">Verification Code</p>
+                      <p className="mt-0.5 font-semibold text-[#8F0E15]">
+                        {evaluation.issuedCertificate?.certificateCode ?? 'Pending'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {evaluation && evaluation.reasons.length > 0 && !evaluation.issuedCertificate && (
+                  <div className="pt-3 border-t border-slate-100">
+                    <p className="text-xs font-semibold text-slate-700 mb-1.5">
+                      Remaining Criteria
+                    </p>
+                    <ul className="list-disc pl-4 space-y-1 text-xs text-slate-600">
+                      {evaluation.reasons.map((r, idx) => (
+                        <li key={idx}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </section>
+            ))}
           </div>
         )}
       </div>
     );
   }
 
-  // Staff View (Super Admin / Programme Manager)
-  const rows = data?.eligibilityRows ?? [];
-  const eligiblePendingIds = rows
-    .filter((r) => r.eligible && !r.issuedCertificate)
-    .map((r) => r.participantId);
-  const issuedCount = rows.filter((r) => r.issuedCertificate).length;
+  // STAFF VIEW (Super Admin & Programme Manager)
+  const eligibleUnissued = (data?.eligibilityRows ?? []).filter(
+    (r) => r.eligible && !r.issuedCertificate
+  );
+  const issuedCount = (data?.eligibilityRows ?? []).filter((r) => Boolean(r.issuedCertificate)).length;
 
   return (
     <div className="space-y-6">
-      {/* Header & Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-slate-900">
-            Certificates & Eligibility Verification
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+            Certificates & Eligibility Governance
           </h2>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Configure completion thresholds, verify backend performance criteria, issue unique certificate codes, and export official PDFs.
+          <p className="mt-1 text-sm text-slate-600">
+            Configure backend-enforced attendance, score, and assessment thresholds, issue
+            verifiable certificates, and download branded PDFs.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            disabled={!programmeId}
+            onClick={() => setShowTemplateModal(true)}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4 shrink-0" />
+            <span>New Template</span>
+          </button>
+
+          {activeTemplate && (
+            <button
+              type="button"
+              onClick={handleExportEligibilityCsv}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
+            >
+              <FileDown className="w-4 h-4 shrink-0" />
+              <span>Export CSV</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div
+          role="alert"
+          className="p-3.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-sm flex items-center gap-2.5"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {notice && (
+        <div className="p-3.5 rounded-lg border border-teal-200 bg-teal-50 text-teal-900 text-sm flex items-center gap-2.5">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-teal-700" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {/* Programme & Template Selectors */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-3">
           <select
             aria-label="Select Programme"
             value={programmeId}
@@ -382,9 +442,9 @@ export function CertificatesPage() {
               setProgrammeId(e.target.value);
               setTemplateId('');
             }}
-            className="px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+            className="h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900"
           >
-            {(data?.filterOptions.programmes ?? []).map((p) => (
+            {data?.filterOptions.programmes.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.code} — {p.title}
               </option>
@@ -393,10 +453,10 @@ export function CertificatesPage() {
 
           {data && data.templates.length > 0 && (
             <select
-              aria-label="Select Template"
-              value={templateId}
+              aria-label="Select Certificate Template"
+              value={templateId || data.activeTemplateId || ''}
               onChange={(e) => setTemplateId(e.target.value)}
-              className="px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+              className="h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900"
             >
               {data.templates.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -405,191 +465,157 @@ export function CertificatesPage() {
               ))}
             </select>
           )}
+        </div>
 
-          {activeTemplate && (
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Download className="w-4 h-4" />
-              Export CSV
-            </button>
-          )}
-
+        {activeTemplate && eligibleUnissued.length > 0 && (
           <button
             type="button"
-            disabled={!programmeId}
-            onClick={() => setShowTemplateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+            disabled={issuing}
+            onClick={() => handleIssue(eligibleUnissued.map((r) => r.participantId))}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-teal-700 text-white text-xs font-semibold hover:bg-teal-800 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
           >
-            <Plus className="w-4 h-4" />
-            New Template
+            <Award className="w-4 h-4 shrink-0" />
+            <span>
+              {issuing ? 'Issuing...' : `Issue All Eligible (${eligibleUnissued.length})`}
+            </span>
           </button>
-        </div>
+        )}
       </div>
 
-      {error && (
-        <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-[#8F0E15]">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="p-3.5 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
-          {notice}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="h-48 bg-white border border-slate-200 rounded-xl animate-pulse" />
-      ) : !activeTemplate ? (
-        <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-3">
+      {!activeTemplate ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 text-center">
           <Award className="w-9 h-9 text-slate-300 mx-auto" />
-          <p className="text-sm font-medium text-slate-800">
-            No certificate template configured for this programme
+          <p className="mt-3 text-sm font-medium text-slate-800">
+            No certificate template created for this programme yet
           </p>
-          <p className="text-xs text-slate-500 max-w-md mx-auto">
-            Create a certificate template with minimum attendance, weighted performance score, assessment completion, and programme completion rules to evaluate participant eligibility.
+          <p className="mt-1 text-xs text-slate-500">
+            Create a certificate template to define minimum attendance, weighted performance score,
+            and completion rules.
           </p>
-          <button
-            type="button"
-            disabled={!programmeId}
-            onClick={() => setShowTemplateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            Create First Certificate Template
-          </button>
         </div>
       ) : (
         <>
-          {/* Active Template Rules Bar */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <ShieldCheck className="w-4 h-4 text-[#B5121B]" />
-                <span>Active Eligibility Policy</span>
-              </div>
-              <h3 className="text-base font-semibold text-slate-900">{activeTemplate.title}</h3>
-              <p className="text-xs text-slate-600 tabular-nums">
-                Min Attendance: <strong>{activeTemplate.minAttendancePct}%</strong> · Min Weighted
-                Score: <strong>{activeTemplate.minOverallScore}%</strong> · All Assessments Required:{' '}
-                <strong>{activeTemplate.requireAllAssessments ? 'Yes' : 'No'}</strong> · Completed
-                Status Required:{' '}
-                <strong>{activeTemplate.requireProgrammeCompletion ? 'Yes' : 'No'}</strong>
-              </p>
+          {/* Rules Summary Strip */}
+          <div className="bg-white rounded-xl border border-slate-200 px-6 py-4 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-600">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+              <span>
+                Min Attendance:{' '}
+                <strong className="font-mono text-slate-900">
+                  {activeTemplate.minAttendancePct}%
+                </strong>
+              </span>
+              <span>
+                Min Weighted Score:{' '}
+                <strong className="font-mono text-slate-900">
+                  {activeTemplate.minOverallScore}%
+                </strong>
+              </span>
+              <span>
+                All Assessments Required:{' '}
+                <strong className="text-slate-900">
+                  {activeTemplate.requireAllAssessments ? 'Yes' : 'No'}
+                </strong>
+              </span>
+              <span>
+                Completed Status Required:{' '}
+                <strong className="text-slate-900">
+                  {activeTemplate.requireProgrammeCompletion ? 'Yes' : 'No'}
+                </strong>
+              </span>
             </div>
-
-            <div className="flex items-center gap-4 shrink-0">
-              <div className="text-right text-xs tabular-nums">
-                <p className="text-slate-500">Issued / Eligible Pending</p>
-                <p className="text-sm font-semibold text-slate-900">
-                  {issuedCount} issued · {eligiblePendingIds.length} ready
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={eligiblePendingIds.length === 0 || issuingIds.length > 0}
-                onClick={() => handleIssue(eligiblePendingIds)}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Award className="w-4 h-4" />
-                Issue All Eligible ({eligiblePendingIds.length})
-              </button>
-            </div>
+            <span className="font-mono tabular-nums text-slate-700">
+              {issuedCount} issued · {eligibleUnissued.length} ready to issue
+            </span>
           </div>
 
-          {/* Eligibility Verification Table */}
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          {/* Eligibility Matrix Table */}
+          <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
+              <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                    <th className="px-5 py-3">Participant</th>
-                    <th className="px-4 py-3">Cohort / Status</th>
-                    <th className="px-4 py-3 text-right">Attendance</th>
-                    <th className="px-4 py-3 text-right">Weighted Score</th>
-                    <th className="px-4 py-3 text-right">Assessments</th>
-                    <th className="px-4 py-3">Eligibility Verification</th>
-                    <th className="px-5 py-3 text-right">Certificate Action</th>
+                  <tr className="border-b border-slate-200 bg-slate-50/70 text-left text-xs font-medium text-slate-500">
+                    <th className="py-3 px-6">Participant</th>
+                    <th className="py-3 px-3">Cohort / Status</th>
+                    <th className="py-3 px-3 text-right">Attendance</th>
+                    <th className="py-3 px-3 text-right">Weighted Score</th>
+                    <th className="py-3 px-3 text-right">Assessments</th>
+                    <th className="py-3 px-4">Eligibility Check</th>
+                    <th className="py-3 px-6 text-right">Certificate Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {rows.length === 0 ? (
+                  {(data?.eligibilityRows ?? []).length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-6 py-10 text-center text-sm text-slate-500">
-                        No participants registered in this programme yet.
+                      <td colSpan={7} className="py-8 text-center text-sm text-slate-500">
+                        No participants enrolled in this programme.
                       </td>
                     </tr>
                   ) : (
-                    rows.map((r) => (
-                      <tr key={r.participantId} className="hover:bg-slate-50/60">
-                        <td className="px-5 py-3.5">
-                          <p className="font-medium text-slate-900">{r.fullName}</p>
-                          <p className="text-xs text-slate-500 font-mono">{r.participantCode}</p>
+                    (data?.eligibilityRows ?? []).map((row) => (
+                      <tr key={row.participantId} className="hover:bg-slate-50/60 align-top">
+                        <td className="py-3.5 px-6">
+                          <p className="font-medium text-slate-900">{row.fullName}</p>
+                          <p className="text-xs font-mono text-slate-500">{row.participantCode}</p>
                         </td>
-                        <td className="px-4 py-3.5 text-xs text-slate-600">
-                          <p className="font-medium text-slate-800">{r.cohortName}</p>
-                          <p className="capitalize">{r.participantStatus}</p>
+                        <td className="py-3.5 px-3 text-xs text-slate-600">
+                          <p>{row.cohortName}</p>
+                          <p className="capitalize text-slate-400">{row.participantStatus}</p>
                         </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums text-slate-900">
-                          {r.attendanceRate !== null ? `${r.attendanceRate}%` : '—'}
+                        <td className="py-3.5 px-3 text-right font-mono tabular-nums text-slate-800">
+                          {row.attendanceRate !== null ? `${row.attendanceRate}%` : '—'}
                         </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums font-medium text-slate-900">
-                          {r.overallScore !== null ? `${r.overallScore}%` : 'Withheld'}
+                        <td className="py-3.5 px-3 text-right font-mono tabular-nums text-slate-900 font-medium">
+                          {row.overallScore !== null ? `${row.overallScore}%` : 'Withheld'}
                         </td>
-                        <td className="px-4 py-3.5 text-right tabular-nums text-slate-700">
-                          {r.gradedAssessments} / {r.requiredAssessments}
+                        <td className="py-3.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                          {row.gradedAssessments}/{row.requiredAssessments}
                         </td>
-                        <td className="px-4 py-3.5 max-w-[280px]">
-                          {r.eligible ? (
-                            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700">
-                              <CheckCircle2 className="w-4 h-4 shrink-0" />
-                              All rules satisfied
+                        <td className="py-3.5 px-4 text-xs max-w-xs">
+                          {row.eligible ? (
+                            <span className="font-medium text-teal-700">
+                              All criteria satisfied
                             </span>
                           ) : (
-                            <div className="space-y-0.5">
-                              <span className="inline-flex items-center gap-1 text-xs font-medium text-[#B5121B]">
-                                <XCircle className="w-3.5 h-3.5 shrink-0" />
-                                Not eligible
-                              </span>
-                              <p className="text-xs text-slate-500 line-clamp-2">
-                                {r.reasons.join(' ')}
-                              </p>
+                            <div className="space-y-0.5 text-rose-700">
+                              {row.reasons.map((r, i) => (
+                                <p key={i}>{r}</p>
+                              ))}
                             </div>
                           )}
                         </td>
-                        <td className="px-5 py-3.5 text-right">
-                          {r.issuedCertificate ? (
-                            <div className="inline-flex items-center gap-2">
-                              <span className="text-xs font-mono text-slate-600">
-                                {r.issuedCertificate.certificateCode}
-                              </span>
+                        <td className="py-3.5 px-6 text-right whitespace-nowrap">
+                          {row.issuedCertificate ? (
+                            <div className="inline-flex flex-col items-end gap-1">
                               <button
                                 type="button"
                                 onClick={() =>
-                                  handleDownloadPdf(
-                                    r,
+                                  triggerPdfDownload(
+                                    row,
                                     activeTemplate,
                                     data?.programme?.title ?? '',
                                     data?.programme?.code ?? ''
                                   )
                                 }
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 cursor-pointer whitespace-nowrap shrink-0"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer"
                               >
-                                <Download className="w-3.5 h-3.5" />
-                                PDF
+                                <Download className="w-3.5 h-3.5 text-[#B5121B]" />
+                                <span>Download PDF</span>
                               </button>
+                              <span className="text-[11px] font-mono text-slate-400">
+                                {row.issuedCertificate.certificateCode}
+                              </span>
                             </div>
-                          ) : (
+                          ) : row.eligible ? (
                             <button
                               type="button"
-                              disabled={!r.eligible || issuingIds.includes(r.participantId)}
-                              onClick={() => handleIssue([r.participantId])}
-                              className="px-3 py-1.5 text-xs font-medium text-white bg-[#B5121B] rounded-md hover:bg-[#8F0E15] disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+                              disabled={issuing}
+                              onClick={() => handleIssue([row.participantId])}
+                              className="px-3 py-1.5 rounded-lg bg-[#B5121B] text-white text-xs font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                             >
-                              {issuingIds.includes(r.participantId) ? 'Issuing...' : 'Issue'}
+                              Issue Certificate
                             </button>
+                          ) : (
+                            <span className="text-xs text-slate-400">Not eligible</span>
                           )}
                         </td>
                       </tr>
@@ -598,22 +624,22 @@ export function CertificatesPage() {
                 </tbody>
               </table>
             </div>
-          </div>
+          </section>
         </>
       )}
 
-      {/* New Template Modal */}
+      {/* New Certificate Template Modal */}
       {showTemplateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="bg-white rounded-xl border border-slate-200 max-w-lg w-full shadow-xl">
+        <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-base font-semibold text-slate-900">
-                Create Certificate Template
+                Configure Certificate Template
               </h3>
               <button
                 type="button"
                 onClick={() => setShowTemplateModal(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
@@ -627,14 +653,13 @@ export function CertificatesPage() {
                 <input
                   type="text"
                   required
-                  minLength={3}
                   value={tplTitle}
                   onChange={(e) => setTplTitle(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Min Attendance (%)
@@ -644,9 +669,9 @@ export function CertificatesPage() {
                     min="0"
                     max="100"
                     required
-                    value={tplMinAttendance}
-                    onChange={(e) => setTplMinAttendance(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg tabular-nums"
+                    value={tplMinAtt}
+                    onChange={(e) => setTplMinAtt(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums"
                   />
                 </div>
                 <div>
@@ -660,33 +685,33 @@ export function CertificatesPage() {
                     required
                     value={tplMinScore}
                     onChange={(e) => setTplMinScore(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg tabular-nums"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums"
                   />
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <label className="flex items-center gap-2.5 text-sm text-slate-800 cursor-pointer">
+              <div className="space-y-2 pt-1">
+                <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={tplRequireAss}
-                    onChange={(e) => setTplRequireAss(e.target.checked)}
-                    className="rounded border-slate-300 text-[#B5121B]"
+                    checked={tplReqAssessments}
+                    onChange={(e) => setTplReqAssessments(e.target.checked)}
+                    className="accent-[#B5121B]"
                   />
-                  <span>Require all cohort/track assessments to be graded</span>
+                  <span>Require all eligible cohort assessments to be graded</span>
                 </label>
-                <label className="flex items-center gap-2.5 text-sm text-slate-800 cursor-pointer">
+                <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={tplRequireComp}
-                    onChange={(e) => setTplRequireComp(e.target.checked)}
-                    className="rounded border-slate-300 text-[#B5121B]"
+                    checked={tplReqCompletion}
+                    onChange={(e) => setTplReqCompletion(e.target.checked)}
+                    className="accent-[#B5121B]"
                   />
-                  <span>Require participant status to be marked &ldquo;Completed&rdquo;</span>
+                  <span>Require participant status to be marked &quot;Completed&quot;</span>
                 </label>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Signatory Name
@@ -695,36 +720,36 @@ export function CertificatesPage() {
                     type="text"
                     value={tplSignatoryName}
                     onChange={(e) => setTplSignatoryName(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-xs"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Signatory Organization / Title
+                    Signatory Title
                   </label>
                   <input
                     type="text"
                     value={tplSignatoryTitle}
                     onChange={(e) => setTplSignatoryTitle(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-xs"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-200">
+              <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setShowTemplateModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={savingTemplate}
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
+                  disabled={creatingTpl}
+                  className="px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                 >
-                  {savingTemplate ? 'Saving...' : 'Create Template'}
+                  {creatingTpl ? 'Saving...' : 'Save Template'}
                 </button>
               </div>
             </form>

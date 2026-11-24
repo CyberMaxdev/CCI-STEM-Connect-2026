@@ -1,21 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
+  CheckCircle2,
   CheckSquare,
-  Download,
   ExternalLink,
   FolderKanban,
   MessageSquare,
   Plus,
   Send,
   Square,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/api';
-import { downloadCsv } from '../lib/export-utils';
 
-interface ProjectMilestone {
+interface MilestoneItem {
   title: string;
   dueDate?: string;
   completed: boolean;
@@ -33,7 +34,7 @@ interface ProjectListItem {
   title: string;
   objectives: string;
   expectedDeliverables: string;
-  milestones: ProjectMilestone[];
+  milestones: MilestoneItem[];
   isTeamProject: boolean;
   maxScore: number;
   deadline: string;
@@ -42,23 +43,7 @@ interface ProjectListItem {
   totalSubmissions: number;
 }
 
-interface LookupOption {
-  id: string;
-  name?: string;
-  title?: string;
-  code?: string;
-  programmeId?: string;
-}
-
-interface TeamContributionDetail {
-  participantId: string;
-  fullName: string;
-  individualScore: number;
-  collaborationScore: number | null;
-  notes: string | null;
-}
-
-interface SubmissionDetail {
+interface ProjectSubmissionDetail {
   id: string;
   submissionUrl: string | null;
   status: 'not_started' | 'in_progress' | 'submitted' | 'evaluated' | 'revision_requested';
@@ -67,7 +52,13 @@ interface SubmissionDetail {
   evaluatedByName: string | null;
   submittedAt: string | null;
   evaluatedAt: string | null;
-  contributions?: TeamContributionDetail[];
+  contributions?: Array<{
+    participantId: string;
+    fullName: string;
+    individualScore: number;
+    collaborationScore: number | null;
+    notes: string | null;
+  }>;
 }
 
 interface ProjectTeamDetail {
@@ -78,7 +69,7 @@ interface ProjectTeamDetail {
     participantCode: string;
     fullName: string;
   }>;
-  submission: SubmissionDetail | null;
+  submission: ProjectSubmissionDetail | null;
 }
 
 interface ProjectParticipantDetail {
@@ -86,7 +77,7 @@ interface ProjectParticipantDetail {
   participantCode: string;
   fullName: string;
   status: string;
-  submission: SubmissionDetail | null;
+  submission: ProjectSubmissionDetail | null;
 }
 
 interface ProjectDetailResponse {
@@ -102,7 +93,7 @@ interface ProjectDetailResponse {
     title: string;
     objectives: string;
     expectedDeliverables: string;
-    milestones: ProjectMilestone[];
+    milestones: MilestoneItem[];
     isTeamProject: boolean;
     maxScore: number;
     deadline: string;
@@ -116,107 +107,110 @@ interface ProjectDetailResponse {
   }>;
 }
 
+interface Lookups {
+  programmes: Array<{ id: string; code: string; title: string }>;
+  cohorts: Array<{ id: string; name: string; programmeId: string }>;
+  tracks: Array<{ id: string; name: string; programmeId: string }>;
+}
+
 const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   not_started: { label: 'Not Started', color: 'text-slate-500' },
-  in_progress: { label: 'In Progress', color: 'text-slate-700' },
-  submitted: { label: 'Submitted', color: 'text-amber-700' },
-  revision_requested: { label: 'Revision Requested', color: 'text-[#B5121B]' },
+  in_progress: { label: 'In Progress', color: 'text-amber-700' },
+  submitted: { label: 'Submitted', color: 'text-[#8F0E15]' },
   evaluated: { label: 'Evaluated', color: 'text-teal-700' },
+  revision_requested: { label: 'Revision Requested', color: 'text-rose-700' },
 };
 
-function isSafeHttpUrl(url: string | null | undefined): boolean {
+function isSafeHttpUrl(url: string | null | undefined): url is string {
   if (!url) return false;
   return url.startsWith('https://') || url.startsWith('http://');
 }
 
 export function ProjectsPage() {
   const { user } = useAuth();
-  const isStaff = user?.role !== 'participant';
+  const isStaff =
+    user?.role === 'super_admin' ||
+    user?.role === 'programme_manager' ||
+    user?.role === 'facilitator';
 
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
-  const [lookups, setLookups] = useState<{
-    programmes: LookupOption[];
-    cohorts: LookupOption[];
-    tracks: LookupOption[];
-  }>({ programmes: [], cohorts: [], tracks: [] });
+  const [lookups, setLookups] = useState<Lookups>({ programmes: [], cohorts: [], tracks: [] });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ProjectDetailResponse | null>(null);
-
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
 
-  // New Project Modal
+  // Create Project Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [savingProject, setSavingProject] = useState(false);
-  const [projProgrammeId, setProjProgrammeId] = useState('');
-  const [projCohortId, setProjCohortId] = useState('');
-  const [projTrackId, setProjTrackId] = useState('');
-  const [projTitle, setProjTitle] = useState('');
-  const [projObjectives, setProjObjectives] = useState('');
-  const [projDeliverables, setProjDeliverables] = useState('');
-  const [projIsTeam, setProjIsTeam] = useState(false);
-  const [projMaxScore, setProjMaxScore] = useState('100');
-  const [projDeadline, setProjDeadline] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 14);
-    return d.toISOString().slice(0, 10);
-  });
-  const [projMilestones, setProjMilestones] = useState<Array<{ title: string; dueDate: string }>>([
-    { title: 'Architecture & Plan Sign-off', dueDate: '' },
-    { title: 'Working Prototype Demonstration', dueDate: '' },
+  const [formProgrammeId, setFormProgrammeId] = useState('');
+  const [formCohortId, setFormCohortId] = useState('');
+  const [formTrackId, setFormTrackId] = useState('');
+  const [formTitle, setFormTitle] = useState('');
+  const [formObjectives, setFormObjectives] = useState('');
+  const [formDeliverables, setFormDeliverables] = useState('');
+  const [formIsTeam, setFormIsTeam] = useState(false);
+  const [formMaxScore, setFormMaxScore] = useState('100');
+  const [formDeadline, setFormDeadline] = useState('');
+  const [formMilestones, setFormMilestones] = useState<Array<{ title: string; dueDate: string }>>([
+    { title: 'Proposal & Technical Design', dueDate: '' },
+    { title: 'Working Prototype & Demo', dueDate: '' },
   ]);
+  const [submittingForm, setSubmittingForm] = useState(false);
 
-  // Team Builder Modal
+  // Create Team Modal
   const [showTeamModal, setShowTeamModal] = useState(false);
   const [teamName, setTeamName] = useState('');
-  const [selectedTeamMembers, setSelectedTeamMembers] = useState<string[]>([]);
-  const [savingTeam, setSavingTeam] = useState(false);
+  const [teamMemberIds, setTeamMemberIds] = useState<string[]>([]);
 
-  // Submission Modal
+  // Submit Deliverable Modal
   const [submitTarget, setSubmitTarget] = useState<{
+    type: 'participant' | 'team';
+    id: string;
     label: string;
-    participantId?: string;
-    teamId?: string;
     existingUrl: string;
+    existingStatus: 'in_progress' | 'submitted';
   } | null>(null);
   const [submissionUrl, setSubmissionUrl] = useState('');
   const [submissionStatus, setSubmissionStatus] = useState<'in_progress' | 'submitted'>('submitted');
-  const [savingSubmission, setSavingSubmission] = useState(false);
 
-  // Evaluation & Participant Feedback Modal
+  // Evaluate & Participant Feedback Modal
   const [evalTarget, setEvalTarget] = useState<{
+    type: 'participant' | 'team';
+    id: string;
     label: string;
-    participantId?: string;
-    teamId?: string;
-    members?: Array<{ participantId: string; fullName: string }>;
-    existing: SubmissionDetail | null;
+    members: Array<{ participantId: string; fullName: string }>;
   } | null>(null);
   const [evalStatus, setEvalStatus] = useState<'evaluated' | 'revision_requested'>('evaluated');
   const [evalScore, setEvalScore] = useState('');
   const [evalFeedback, setEvalFeedback] = useState('');
-  const [evalContributions, setEvalContributions] = useState<
-    Record<string, { individualScore: string; collaborationScore: string; notes: string }>
-  >({});
-  const [savingEval, setSavingEval] = useState(false);
+  const [evalContribs, setEvalContribs] = useState<
+    Array<{
+      participantId: string;
+      fullName: string;
+      individualScore: string;
+      collaborationScore: string;
+      notes: string;
+    }>
+  >([]);
 
-  const loadProjects = useCallback(async (preferredId?: string) => {
-    setLoadingList(true);
-    setError(null);
+  const showToast = (msg: string) => {
+    setNotice(msg);
+    setTimeout(() => setNotice(null), 4000);
+  };
+
+  const loadList = useCallback(async () => {
     try {
-      const data = await apiFetch<{
-        projects: ProjectListItem[];
-        lookups: { programmes: LookupOption[]; cohorts: LookupOption[]; tracks: LookupOption[] };
-      }>('/api/projects');
-      setProjects(data.projects);
-      setLookups(data.lookups);
+      setLoadingList(true);
+      setError(null);
+      const res = await apiFetch<{ projects: ProjectListItem[]; lookups: Lookups }>('/api/projects');
+      setProjects(res.projects);
+      setLookups(res.lookups);
       setSelectedId((prev) => {
-        const candidate = preferredId ?? prev;
-        if (candidate && data.projects.some((p) => p.id === candidate)) {
-          return candidate;
-        }
-        return data.projects[0]?.id ?? null;
+        if (prev && res.projects.some((p) => p.id === prev)) return prev;
+        return res.projects[0]?.id ?? null;
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load STEM projects.');
@@ -226,21 +220,22 @@ export function ProjectsPage() {
   }, []);
 
   const loadDetail = useCallback(async (projectId: string) => {
-    setLoadingDetail(true);
-    setError(null);
     try {
-      const data = await apiFetch<ProjectDetailResponse>(`/api/projects/${projectId}`);
-      setDetail(data);
+      setLoadingDetail(true);
+      setError(null);
+      const res = await apiFetch<ProjectDetailResponse>(`/api/projects/${projectId}`);
+      setDetail(res);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load project details.');
+      setError(err instanceof Error ? err.message : 'Unable to load project workspace.');
+      setDetail(null);
     } finally {
       setLoadingDetail(false);
     }
   }, []);
 
   useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+    loadList();
+  }, [loadList]);
 
   useEffect(() => {
     if (selectedId) {
@@ -250,41 +245,52 @@ export function ProjectsPage() {
     }
   }, [selectedId, loadDetail]);
 
-  const cohortsForFormProgramme = useMemo(
-    () => lookups.cohorts.filter((c) => c.programmeId === projProgrammeId),
-    [lookups.cohorts, projProgrammeId]
+  const filteredProjects = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter(
+      (p) =>
+        p.title.toLowerCase().includes(q) ||
+        p.programmeCode.toLowerCase().includes(q) ||
+        p.cohortName.toLowerCase().includes(q)
+    );
+  }, [projects, searchTerm]);
+
+  const formCohorts = useMemo(
+    () => lookups.cohorts.filter((c) => c.programmeId === formProgrammeId),
+    [lookups.cohorts, formProgrammeId]
   );
 
-  const tracksForFormProgramme = useMemo(
-    () => lookups.tracks.filter((t) => t.programmeId === projProgrammeId),
-    [lookups.tracks, projProgrammeId]
+  const formTracks = useMemo(
+    () => lookups.tracks.filter((t) => t.programmeId === formProgrammeId),
+    [lookups.tracks, formProgrammeId]
   );
 
   const openCreateModal = () => {
     const defaultProg = lookups.programmes[0]?.id ?? '';
-    setProjProgrammeId(defaultProg);
-    const matchingCohorts = lookups.cohorts.filter((c) => c.programmeId === defaultProg);
-    setProjCohortId(matchingCohorts[0]?.id ?? '');
-    setProjTrackId('');
-    setProjTitle('');
-    setProjObjectives('');
-    setProjDeliverables('');
-    setProjIsTeam(false);
-    setProjMaxScore('100');
-    setProjMilestones([
-      { title: 'Architecture & Plan Sign-off', dueDate: '' },
-      { title: 'Working Prototype Demonstration', dueDate: '' },
+    const defaultCohort = lookups.cohorts.find((c) => c.programmeId === defaultProg)?.id ?? '';
+    setFormProgrammeId(defaultProg);
+    setFormCohortId(defaultCohort);
+    setFormTrackId('');
+    setFormTitle('');
+    setFormObjectives('');
+    setFormDeliverables('');
+    setFormIsTeam(false);
+    setFormMaxScore('100');
+    setFormDeadline(new Date(Date.now() + 14 * 86400_000).toISOString().slice(0, 10));
+    setFormMilestones([
+      { title: 'Proposal & Architecture', dueDate: '' },
+      { title: 'Working Prototype & Presentation', dueDate: '' },
     ]);
     setShowCreateModal(true);
   };
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSavingProject(true);
-    setError(null);
-    setNotice(null);
     try {
-      const cleanMilestones = projMilestones
+      setSubmittingForm(true);
+      setError(null);
+      const cleanMilestones = formMilestones
         .filter((m) => m.title.trim().length >= 2)
         .map((m) => ({
           title: m.title.trim(),
@@ -295,42 +301,42 @@ export function ProjectsPage() {
       const res = await apiFetch<{ project: { id: string } }>('/api/projects', {
         method: 'POST',
         body: {
-          programmeId: projProgrammeId,
-          cohortId: projCohortId,
-          trackId: projTrackId || null,
-          title: projTitle.trim(),
-          objectives: projObjectives.trim(),
-          expectedDeliverables: projDeliverables.trim(),
-          isTeamProject: projIsTeam,
-          maxScore: Number(projMaxScore) || 100,
-          deadline: new Date(`${projDeadline}T23:59:00Z`).toISOString(),
+          programmeId: formProgrammeId,
+          cohortId: formCohortId,
+          trackId: formTrackId || null,
+          title: formTitle.trim(),
+          objectives: formObjectives.trim(),
+          expectedDeliverables: formDeliverables.trim(),
+          isTeamProject: formIsTeam,
+          maxScore: Number(formMaxScore) || 100,
+          deadline: formDeadline,
           milestones: cleanMilestones,
         },
       });
       setShowCreateModal(false);
-      setNotice('STEM project created and linked to the cohort.');
-      await loadProjects(res.project.id);
+      showToast('STEM project created and linked to cohort.');
+      await loadList();
+      setSelectedId(res.project.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to create project.');
     } finally {
-      setSavingProject(false);
+      setSubmittingForm(false);
     }
   };
 
   const handleToggleMilestone = async (index: number) => {
     if (!detail || !isStaff) return;
-    const updated = detail.project.milestones.map((m, idx) =>
-      idx === index ? { ...m, completed: !m.completed } : m
+    const updatedMilestones = detail.project.milestones.map((m, i) =>
+      i === index ? { ...m, completed: !m.completed } : m
     );
     try {
+      setError(null);
       await apiFetch(`/api/projects/${detail.project.id}/milestones`, {
         method: 'PATCH',
-        body: { milestones: updated },
+        body: { milestones: updatedMilestones },
       });
-      setDetail({
-        ...detail,
-        project: { ...detail.project, milestones: updated },
-      });
+      await loadDetail(detail.project.id);
+      showToast('Milestone status updated.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to update milestone.');
     }
@@ -338,418 +344,376 @@ export function ProjectsPage() {
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!detail || selectedTeamMembers.length === 0) return;
-    setSavingTeam(true);
-    setError(null);
-    setNotice(null);
+    if (!detail) return;
     try {
+      setSubmittingForm(true);
+      setError(null);
       await apiFetch(`/api/projects/${detail.project.id}/teams`, {
         method: 'POST',
         body: {
           name: teamName.trim(),
-          participantIds: selectedTeamMembers,
+          participantIds: teamMemberIds,
         },
       });
       setShowTeamModal(false);
       setTeamName('');
-      setSelectedTeamMembers([]);
-      setNotice('Project team created with assigned cohort members.');
+      setTeamMemberIds([]);
+      showToast('Project team created.');
       await loadDetail(detail.project.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to create project team.');
+      setError(err instanceof Error ? err.message : 'Unable to create team.');
     } finally {
-      setSavingTeam(false);
+      setSubmittingForm(false);
     }
-  };
-
-  const openSubmitModal = (target: {
-    label: string;
-    participantId?: string;
-    teamId?: string;
-    existingUrl: string;
-  }) => {
-    setSubmitTarget(target);
-    setSubmissionUrl(target.existingUrl);
-    setSubmissionStatus('submitted');
   };
 
   const handleSubmitDeliverable = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!detail || !submitTarget) return;
-    setSavingSubmission(true);
-    setError(null);
-    setNotice(null);
     try {
+      setSubmittingForm(true);
+      setError(null);
       await apiFetch(`/api/projects/${detail.project.id}/submit`, {
         method: 'POST',
         body: {
-          participantId: submitTarget.participantId,
-          teamId: submitTarget.teamId,
+          participantId: submitTarget.type === 'participant' ? submitTarget.id : undefined,
+          teamId: submitTarget.type === 'team' ? submitTarget.id : undefined,
           submissionUrl: submissionUrl.trim() || null,
           status: submissionStatus,
         },
       });
       setSubmitTarget(null);
-      setNotice('Project deliverable recorded.');
-      await Promise.all([loadDetail(detail.project.id), loadProjects(detail.project.id)]);
+      showToast('Project deliverable saved.');
+      await Promise.all([loadList(), loadDetail(detail.project.id)]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save project deliverable.');
+      setError(err instanceof Error ? err.message : 'Unable to record project submission.');
     } finally {
-      setSavingSubmission(false);
+      setSubmittingForm(false);
     }
   };
 
-  const openEvaluateModal = (target: {
-    label: string;
-    participantId?: string;
-    teamId?: string;
-    members?: Array<{ participantId: string; fullName: string }>;
-    existing: SubmissionDetail | null;
-  }) => {
-    setEvalTarget(target);
+  const openEvaluationModal = (
+    type: 'participant' | 'team',
+    id: string,
+    label: string,
+    existing: ProjectSubmissionDetail | null,
+    members: Array<{ participantId: string; fullName: string }> = []
+  ) => {
+    setEvalTarget({ type, id, label, members });
     setEvalStatus(
-      target.existing?.status === 'revision_requested' ? 'revision_requested' : 'evaluated'
+      existing?.status === 'revision_requested' ? 'revision_requested' : 'evaluated'
     );
-    setEvalScore(
-      target.existing?.qualityScore !== null && target.existing?.qualityScore !== undefined
-        ? String(target.existing.qualityScore)
-        : ''
-    );
-    setEvalFeedback(target.existing?.feedback ?? '');
-
-    if (target.members) {
-      const nextMap: Record<
-        string,
-        { individualScore: string; collaborationScore: string; notes: string }
-      > = {};
-      for (const m of target.members) {
-        const prev = target.existing?.contributions?.find((c) => c.participantId === m.participantId);
-        nextMap[m.participantId] = {
-          individualScore: prev ? String(prev.individualScore) : '80',
-          collaborationScore:
-            prev && prev.collaborationScore !== null ? String(prev.collaborationScore) : '80',
-          notes: prev?.notes ?? '',
-        };
-      }
-      setEvalContributions(nextMap);
+    setEvalScore(existing?.qualityScore !== null && existing?.qualityScore !== undefined ? String(existing.qualityScore) : '');
+    setEvalFeedback(existing?.feedback ?? '');
+    if (type === 'team') {
+      setEvalContribs(
+        members.map((m) => {
+          const match = existing?.contributions?.find((c) => c.participantId === m.participantId);
+          return {
+            participantId: m.participantId,
+            fullName: m.fullName,
+            individualScore: match ? String(match.individualScore) : '80',
+            collaborationScore:
+              match && match.collaborationScore !== null ? String(match.collaborationScore) : '85',
+            notes: match?.notes ?? '',
+          };
+        })
+      );
     } else {
-      setEvalContributions({});
+      setEvalContribs([]);
     }
   };
 
-  const handleSaveEvaluation = async (e: React.FormEvent) => {
+  const handleEvaluateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!detail || !evalTarget) return;
-    setSavingEval(true);
-    setError(null);
-    setNotice(null);
     try {
-      const contributions = evalTarget.members
-        ? evalTarget.members.map((m) => {
-            const entry = evalContributions[m.participantId];
-            return {
-              participantId: m.participantId,
-              individualScore: Number(entry?.individualScore ?? 0),
-              collaborationScore:
-                entry?.collaborationScore !== '' ? Number(entry.collaborationScore) : null,
-              notes: entry?.notes?.trim() || null,
-            };
-          })
-        : undefined;
-
+      setSubmittingForm(true);
+      setError(null);
+      const parsedScore = evalScore.trim() === '' ? null : Number(evalScore);
       await apiFetch(`/api/projects/${detail.project.id}/evaluate`, {
         method: 'POST',
         body: {
-          participantId: evalTarget.participantId,
-          teamId: evalTarget.teamId,
+          participantId: evalTarget.type === 'participant' ? evalTarget.id : undefined,
+          teamId: evalTarget.type === 'team' ? evalTarget.id : undefined,
           status: evalStatus,
-          qualityScore: evalScore !== '' ? Number(evalScore) : null,
+          qualityScore: parsedScore,
           feedback: evalFeedback.trim() || null,
-          contributions,
+          contributions:
+            evalTarget.type === 'team'
+              ? evalContribs.map((c) => ({
+                  participantId: c.participantId,
+                  individualScore: Number(c.individualScore) || 0,
+                  collaborationScore:
+                    c.collaborationScore.trim() !== '' ? Number(c.collaborationScore) : null,
+                  notes: c.notes.trim() || null,
+                }))
+              : undefined,
         },
       });
       setEvalTarget(null);
-      setNotice('Project evaluation and participant feedback saved to database.');
-      await Promise.all([loadDetail(detail.project.id), loadProjects(detail.project.id)]);
+      showToast('Evaluation and participant feedback saved. Performance scores updated.');
+      await Promise.all([loadList(), loadDetail(detail.project.id)]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save project evaluation.');
+      setError(err instanceof Error ? err.message : 'Unable to save evaluation.');
     } finally {
-      setSavingEval(false);
+      setSubmittingForm(false);
     }
   };
 
-  const handleExportSubmissionsCsv = () => {
-    if (!detail) return;
-    const maxScore = detail.project.maxScore;
-    if (detail.project.isTeamProject) {
-      downloadCsv(
-        `CCI-Project-Teams-${detail.project.title.replace(/[^A-Za-z0-9_-]/g, '_')}.csv`,
-        ['Team', 'Members', 'Status', 'Quality Score', 'Max Score', 'Deliverable URL', 'Feedback'],
-        detail.teams.map((t) => [
-          t.name,
-          t.members.map((m) => m.fullName).join('; '),
-          t.submission?.status ?? 'not_started',
-          t.submission?.qualityScore ?? '',
-          maxScore,
-          t.submission?.submissionUrl ?? '',
-          t.submission?.feedback ?? '',
-        ])
-      );
-    } else {
-      downloadCsv(
-        `CCI-Project-Submissions-${detail.project.title.replace(/[^A-Za-z0-9_-]/g, '_')}.csv`,
-        [
-          'Participant ID',
-          'Full Name',
-          'Status',
-          'Quality Score',
-          'Max Score',
-          'Deliverable URL',
-          'Facilitator Feedback',
-        ],
-        detail.participants.map((p) => [
-          p.participantCode,
-          p.fullName,
-          p.submission?.status ?? 'not_started',
-          p.submission?.qualityScore ?? '',
-          maxScore,
-          p.submission?.submissionUrl ?? '',
-          p.submission?.feedback ?? '',
-        ])
-      );
-    }
-  };
-
-  const completedMilestones = detail
-    ? detail.project.milestones.filter((m) => m.completed).length
-    : 0;
-  const totalMilestones = detail ? detail.project.milestones.length : 0;
+  const milestoneCompletedCount =
+    detail?.project.milestones.filter((m) => m.completed).length ?? 0;
+  const milestoneTotalCount = detail?.project.milestones.length ?? 0;
+  const milestonePct =
+    milestoneTotalCount > 0
+      ? Math.round((milestoneCompletedCount / milestoneTotalCount) * 100)
+      : 0;
 
   return (
     <div className="space-y-6">
-      {/* Header Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-slate-900">STEM Projects & Participant Feedback</h2>
-          <p className="text-sm text-slate-600 mt-0.5">
-            Track individual and team STEM deliverables, milestones, evaluations, and collaboration scores.
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+            STEM Projects, Milestones & Feedback
+          </h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Track individual and team STEM deliverables, facilitator feedback, and per-member
+            collaboration scores connected directly to the Performance Engine.
           </p>
         </div>
-        <div className="flex items-center gap-2.5 shrink-0">
-          {detail && isStaff && (
-            <button
-              type="button"
-              onClick={handleExportSubmissionsCsv}
-              className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Download className="w-4 h-4" />
-              Export CSV
-            </button>
-          )}
-          {isStaff && (
-            <button
-              type="button"
-              onClick={openCreateModal}
-              disabled={lookups.programmes.length === 0}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Plus className="w-4 h-4" />
-              New STEM Project
-            </button>
-          )}
-        </div>
+
+        {isStaff && (
+          <button
+            type="button"
+            onClick={openCreateModal}
+            disabled={lookups.programmes.length === 0}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-auto"
+          >
+            <Plus className="w-4 h-4 shrink-0" />
+            <span>New STEM Project</span>
+          </button>
+        )}
       </div>
 
       {error && (
-        <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-sm text-[#8F0E15]">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="p-3.5 rounded-lg bg-teal-50 border border-teal-200 text-sm text-teal-800">
-          {notice}
+        <div
+          role="alert"
+          className="p-3.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-800 text-sm flex items-center gap-2.5"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+          <span>{error}</span>
         </div>
       )}
 
-      {/* Master-Detail Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Project List */}
-        <section className="lg:col-span-4 bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-900">Active Projects</h3>
-            <span className="text-xs text-slate-500 tabular-nums">{projects.length} total</span>
+      {notice && (
+        <div className="p-3.5 rounded-lg border border-teal-200 bg-teal-50 text-teal-900 text-sm flex items-center gap-2.5">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-teal-700" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        {/* Left Sidebar: Project List */}
+        <section className="xl:col-span-4 bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="p-4 border-b border-slate-200 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-900">Active Projects</h3>
+              <span className="text-xs font-mono tabular-nums text-slate-500">
+                {filteredProjects.length}
+              </span>
+            </div>
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Filter by title, programme, cohort..."
+              className="w-full h-9 px-3 rounded-lg border border-slate-200 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#B5121B]"
+            />
           </div>
 
           {loadingList ? (
-            <div className="p-4 space-y-3">
+            <div className="p-4 space-y-2.5">
               {[1, 2, 3].map((i) => (
                 <div key={i} className="h-16 bg-slate-100 rounded-lg animate-pulse" />
               ))}
             </div>
-          ) : projects.length === 0 ? (
+          ) : filteredProjects.length === 0 ? (
             <div className="p-8 text-center">
-              <FolderKanban className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <p className="text-sm font-medium text-slate-800">No STEM projects yet</p>
-              <p className="text-xs text-slate-500 mt-1">
+              <FolderKanban className="w-8 h-8 text-slate-300 mx-auto" />
+              <p className="mt-2.5 text-sm font-medium text-slate-700">No STEM projects yet</p>
+              <p className="mt-1 text-xs text-slate-500">
                 {isStaff
-                  ? 'Create an individual or team project to track deliverables and feedback.'
-                  : 'Assigned STEM projects for your cohort will appear here.'}
+                  ? 'Create a project for a cohort to track milestones, team deliverables, and facilitator feedback.'
+                  : 'Assigned cohort STEM projects will appear here once scheduled.'}
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-slate-100 max-h-[680px] overflow-y-auto">
-              {projects.map((p) => {
-                const active = p.id === selectedId;
+            <ul className="divide-y divide-slate-100 max-h-[640px] overflow-y-auto">
+              {filteredProjects.map((proj) => {
+                const active = proj.id === selectedId;
                 return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => setSelectedId(p.id)}
-                    className={`w-full text-left px-4 py-3.5 transition-colors cursor-pointer ${
-                      active ? 'bg-red-50/60' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <p
-                        className={`text-sm font-semibold leading-snug ${
-                          active ? 'text-[#B5121B]' : 'text-slate-900'
-                        }`}
-                      >
-                        {p.title}
+                  <li key={proj.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(proj.id)}
+                      className={`w-full text-left px-4 py-3.5 transition-colors cursor-pointer ${
+                        active ? 'bg-red-50/55' : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <p
+                          className={`text-sm font-semibold ${
+                            active ? 'text-[#8F0E15]' : 'text-slate-900'
+                          }`}
+                        >
+                          {proj.title}
+                        </p>
+                        <span className="text-xs font-mono tabular-nums text-slate-500 shrink-0">
+                          {proj.maxScore} pts
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500 truncate">
+                        {proj.programmeCode} · {proj.cohortName}
+                        {proj.trackName ? ` · ${proj.trackName}` : ''}
                       </p>
-                      <span className="text-xs font-medium text-slate-500 shrink-0">
-                        {p.isTeamProject ? 'Team' : 'Individual'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-1 truncate">
-                      {p.programmeCode} · {p.cohortName}
-                      {p.trackName ? ` · ${p.trackName}` : ''}
-                    </p>
-                    <div className="flex items-center justify-between text-xs text-slate-500 mt-2 tabular-nums">
-                      <span>Due {new Date(p.deadline).toLocaleDateString()}</span>
-                      <span>
-                        {p.evaluatedCount} evaluated · {p.submittedCount} submitted
-                      </span>
-                    </div>
-                  </button>
+                      <div className="mt-1.5 flex items-center justify-between text-xs text-slate-500">
+                        <span>{proj.isTeamProject ? 'Team Project' : 'Individual Project'}</span>
+                        <span className="font-mono tabular-nums">
+                          {proj.evaluatedCount} evaluated · Due{' '}
+                          {new Date(proj.deadline).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </button>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
           )}
         </section>
 
-        {/* Right Detail Panel */}
-        <section className="lg:col-span-8 space-y-6">
+        {/* Right Detail Workspace */}
+        <div className="xl:col-span-8 space-y-6">
           {loadingDetail ? (
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-              <div className="h-6 w-1/2 bg-slate-100 rounded animate-pulse" />
+            <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+              <div className="h-7 w-1/2 bg-slate-100 rounded animate-pulse" />
               <div className="h-24 bg-slate-100 rounded animate-pulse" />
+              <div className="h-44 bg-slate-100 rounded animate-pulse" />
             </div>
           ) : !detail ? (
-            <div className="bg-white border border-slate-200 rounded-xl p-10 text-center">
-              <p className="text-sm text-slate-500">Select a STEM project to inspect deliverables, teams, and evaluations.</p>
+            <div className="bg-white rounded-xl border border-slate-200 p-10 text-center">
+              <p className="text-sm text-slate-600">
+                Select a STEM project from the list to manage milestones, submissions, and
+                participant feedback.
+              </p>
             </div>
           ) : (
             <>
               {/* Project Overview & Milestones */}
-              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b border-slate-100 pb-4">
-                  <div className="space-y-1">
-                    <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2">
-                      <span className="font-medium text-slate-700">{detail.project.programmeCode}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{detail.project.cohortName}</span>
-                      {detail.project.trackName && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span>{detail.project.trackName}</span>
-                        </>
-                      )}
-                      <span aria-hidden="true">·</span>
-                      <span>{detail.project.isTeamProject ? 'Team Project' : 'Individual Project'}</span>
-                    </div>
-                    <h3 className="text-lg font-semibold text-slate-900">{detail.project.title}</h3>
-                  </div>
-                  <div className="text-left sm:text-right text-xs text-slate-500 shrink-0 tabular-nums">
-                    <p className="font-medium text-slate-800">
-                      Max Score: {detail.project.maxScore} pts
+              <section className="bg-white rounded-xl border border-slate-200 p-6 space-y-5">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 pb-4 border-b border-slate-100">
+                  <div>
+                    <p className="text-xs text-slate-500">
+                      {detail.project.programmeCode} — {detail.project.programmeTitle} ·{' '}
+                      {detail.project.cohortName}
+                      {detail.project.trackName ? ` · ${detail.project.trackName}` : ''}
                     </p>
-                    <p className="mt-0.5">
+                    <h3 className="mt-1 text-xl font-bold text-slate-900">
+                      {detail.project.title}
+                    </h3>
+                  </div>
+                  <div className="text-xs text-slate-600 font-mono tabular-nums sm:text-right shrink-0">
+                    <p>
+                      {detail.project.isTeamProject ? 'Team Project' : 'Individual Project'} · Max{' '}
+                      {detail.project.maxScore} pts
+                    </p>
+                    <p className="mt-0.5 text-slate-500">
                       Deadline: {new Date(detail.project.deadline).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
                   <div>
-                    <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                      Project Objectives
-                    </h4>
-                    <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+                    <h4 className="text-xs font-semibold text-slate-500">Project Objectives</h4>
+                    <p className="mt-1.5 text-slate-700 leading-relaxed whitespace-pre-line">
                       {detail.project.objectives}
                     </p>
                   </div>
                   <div>
-                    <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                      Expected Deliverables
-                    </h4>
-                    <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+                    <h4 className="text-xs font-semibold text-slate-500">Expected Deliverables</h4>
+                    <p className="mt-1.5 text-slate-700 leading-relaxed whitespace-pre-line">
                       {detail.project.expectedDeliverables}
                     </p>
                   </div>
                 </div>
 
-                {/* Milestones Checklist */}
-                <div className="pt-4 border-t border-slate-100">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-sm font-semibold text-slate-900">Project Milestones</h4>
-                    <span className="text-xs text-slate-500 tabular-nums">
-                      {completedMilestones} of {totalMilestones} completed
-                    </span>
-                  </div>
-                  {detail.project.milestones.length === 0 ? (
-                    <p className="text-xs text-slate-500">No milestones configured for this project.</p>
-                  ) : (
+                {/* Milestones */}
+                {detail.project.milestones.length > 0 && (
+                  <div className="pt-4 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-semibold text-slate-900">
+                        Project Milestones
+                      </h4>
+                      <span className="text-xs font-mono tabular-nums text-slate-600">
+                        {milestoneCompletedCount}/{milestoneTotalCount} completed ({milestonePct}%)
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden mb-3">
+                      <div
+                        className="h-full bg-[#B5121B] transition-all"
+                        style={{ width: `${milestonePct}%` }}
+                      />
+                    </div>
                     <ul className="divide-y divide-slate-100">
-                      {detail.project.milestones.map((m, idx) => (
-                        <li key={`${m.title}-${idx}`} className="py-2 flex items-center justify-between gap-3">
+                      {detail.project.milestones.map((ms, idx) => (
+                        <li
+                          key={`${ms.title}-${idx}`}
+                          className="py-2 flex items-center justify-between gap-3"
+                        >
                           <button
                             type="button"
                             disabled={!isStaff}
                             onClick={() => handleToggleMilestone(idx)}
-                            className={`flex items-center gap-2.5 text-left text-sm ${
-                              isStaff ? 'cursor-pointer hover:text-slate-950' : 'cursor-default'
-                            } ${m.completed ? 'text-slate-500 line-through' : 'text-slate-800'}`}
+                            className={`flex items-center gap-2.5 text-sm text-left ${
+                              isStaff ? 'cursor-pointer hover:text-[#8F0E15]' : 'cursor-default'
+                            }`}
                           >
-                            {m.completed ? (
+                            {ms.completed ? (
                               <CheckSquare className="w-4 h-4 text-teal-700 shrink-0" />
                             ) : (
                               <Square className="w-4 h-4 text-slate-400 shrink-0" />
                             )}
-                            <span>{m.title}</span>
+                            <span
+                              className={
+                                ms.completed ? 'line-through text-slate-400' : 'text-slate-800'
+                              }
+                            >
+                              {ms.title}
+                            </span>
                           </button>
-                          {m.dueDate && (
-                            <span className="text-xs text-slate-500 tabular-nums shrink-0">
-                              {m.dueDate}
+                          {ms.dueDate && (
+                            <span className="text-xs font-mono tabular-nums text-slate-400 shrink-0">
+                              {ms.dueDate}
                             </span>
                           )}
                         </li>
                       ))}
                     </ul>
-                  )}
-                </div>
-              </div>
+                  </div>
+                )}
+              </section>
 
-              {/* Team Submissions OR Individual Submissions */}
+              {/* Deliverables, Teams & Facilitator Feedback */}
               {detail.project.isTeamProject ? (
-                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                  <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
                     <div>
-                      <h4 className="text-sm font-semibold text-slate-900">
-                        Project Teams, Submissions & Contribution Scoring
+                      <h4 className="text-base font-semibold text-slate-900">
+                        Project Teams, Submissions & Feedback
                       </h4>
                       <p className="text-xs text-slate-500 mt-0.5">
-                        Individual contribution and collaboration scores feed directly into the Performance Engine.
+                        Each member&apos;s individual and collaboration scores feed directly into
+                        their performance record.
                       </p>
                     </div>
                     {isStaff && (
@@ -757,246 +721,277 @@ export function ProjectsPage() {
                         type="button"
                         onClick={() => {
                           setTeamName('');
-                          setSelectedTeamMembers([]);
+                          setTeamMemberIds([]);
                           setShowTeamModal(true);
                         }}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#B5121B] text-white text-xs font-semibold hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap shrink-0"
                       >
                         <Users className="w-3.5 h-3.5" />
-                        Create Team
+                        <span>Create Team</span>
                       </button>
                     )}
                   </div>
 
                   {detail.teams.length === 0 ? (
-                    <div className="p-8 text-center">
-                      <p className="text-sm text-slate-600">No project teams formed yet.</p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        {isStaff
-                          ? 'Create teams and assign cohort participants to start tracking team deliverables.'
-                          : 'Your facilitator will assign you to a team for this project.'}
-                      </p>
+                    <div className="p-8 text-center text-sm text-slate-500">
+                      {isStaff
+                        ? 'No teams formed yet. Click "Create Team" to group cohort participants.'
+                        : 'You have not been assigned to a team for this project yet.'}
                     </div>
                   ) : (
-                    <div className="divide-y divide-slate-200">
+                    <div className="divide-y divide-slate-100">
                       {detail.teams.map((team) => {
-                        const sub = team.submission;
-                        const statusInfo = STATUS_LABELS[sub?.status ?? 'not_started'];
+                        const statusKey = team.submission?.status ?? 'not_started';
+                        const statusMeta = STATUS_LABELS[statusKey] ?? STATUS_LABELS.not_started;
                         return (
                           <div key={team.id} className="p-6 space-y-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                               <div>
                                 <div className="flex items-center gap-2.5 flex-wrap">
-                                  <h5 className="text-sm font-semibold text-slate-900">{team.name}</h5>
-                                  <span className="text-xs text-slate-400">·</span>
-                                  <span className={`text-xs font-medium ${statusInfo.color}`}>
-                                    {statusInfo.label}
+                                  <h5 className="text-sm font-semibold text-slate-900">
+                                    {team.name}
+                                  </h5>
+                                  <span className={`text-xs font-medium ${statusMeta.color}`}>
+                                    · {statusMeta.label}
                                   </span>
-                                  {sub?.qualityScore !== null && sub?.qualityScore !== undefined && (
-                                    <>
-                                      <span className="text-xs text-slate-400">·</span>
-                                      <span className="text-xs font-semibold text-slate-900 tabular-nums">
-                                        {sub.qualityScore} / {detail.project.maxScore}
+                                  {team.submission?.qualityScore !== null &&
+                                    team.submission?.qualityScore !== undefined && (
+                                      <span className="text-xs font-mono tabular-nums font-semibold text-slate-800">
+                                        · {team.submission.qualityScore}/{detail.project.maxScore}
                                       </span>
-                                    </>
-                                  )}
+                                    )}
                                 </div>
-                                <p className="text-xs text-slate-600 mt-1">
-                                  Members: {team.members.map((m) => m.fullName).join(', ')}
+                                <p className="mt-1 text-xs text-slate-500">
+                                  Members:{' '}
+                                  {team.members
+                                    .map((m) => `${m.fullName} (${m.participantCode})`)
+                                    .join(', ')}
                                 </p>
                               </div>
 
                               <div className="flex items-center gap-2 shrink-0">
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    openSubmitModal({
+                                  onClick={() => {
+                                    setSubmitTarget({
+                                      type: 'team',
+                                      id: team.id,
                                       label: team.name,
-                                      teamId: team.id,
-                                      existingUrl: sub?.submissionUrl ?? '',
-                                    })
-                                  }
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer whitespace-nowrap shrink-0"
+                                      existingUrl: team.submission?.submissionUrl ?? '',
+                                      existingStatus:
+                                        team.submission?.status === 'in_progress'
+                                          ? 'in_progress'
+                                          : 'submitted',
+                                    });
+                                    setSubmissionUrl(team.submission?.submissionUrl ?? '');
+                                    setSubmissionStatus('submitted');
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
                                 >
                                   <Send className="w-3.5 h-3.5" />
-                                  {sub?.submissionUrl ? 'Update Link' : 'Submit Work'}
+                                  <span>Submit Link</span>
                                 </button>
                                 {isStaff && (
                                   <button
                                     type="button"
                                     onClick={() =>
-                                      openEvaluateModal({
-                                        label: team.name,
-                                        teamId: team.id,
-                                        members: team.members,
-                                        existing: sub,
-                                      })
+                                      openEvaluationModal(
+                                        'team',
+                                        team.id,
+                                        team.name,
+                                        team.submission,
+                                        team.members
+                                      )
                                     }
-                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap shrink-0"
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#B5121B] text-white text-xs font-semibold hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap"
                                   >
                                     <MessageSquare className="w-3.5 h-3.5" />
-                                    Evaluate & Feedback
+                                    <span>Evaluate</span>
                                   </button>
                                 )}
                               </div>
                             </div>
 
-                            {isSafeHttpUrl(sub?.submissionUrl) && (
-                              <a
-                                href={sub!.submissionUrl!}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1.5 text-xs font-medium text-[#B5121B] hover:underline"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5" />
-                                {sub!.submissionUrl}
-                              </a>
+                            {isSafeHttpUrl(team.submission?.submissionUrl) && (
+                              <div className="text-xs">
+                                <a
+                                  href={team.submission.submissionUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-[#B5121B] hover:text-[#8F0E15] font-medium underline underline-offset-2 break-all"
+                                >
+                                  <span>{team.submission.submissionUrl}</span>
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                </a>
+                              </div>
                             )}
 
-                            {sub?.feedback && (
-                              <div className="pt-2 text-xs text-slate-700 bg-slate-50 rounded-lg p-3">
-                                <p className="font-medium text-slate-900 mb-1">
+                            {team.submission?.feedback && (
+                              <div className="text-xs text-slate-700 bg-slate-50 rounded-lg p-3">
+                                <span className="font-semibold text-slate-900">
                                   Facilitator Feedback
-                                  {sub.evaluatedByName ? ` · ${sub.evaluatedByName}` : ''}
-                                </p>
-                                <p className="whitespace-pre-line">{sub.feedback}</p>
+                                  {team.submission.evaluatedByName
+                                    ? ` (${team.submission.evaluatedByName})`
+                                    : ''}
+                                  :{' '}
+                                </span>
+                                {team.submission.feedback}
                               </div>
                             )}
 
-                            {sub?.contributions && sub.contributions.length > 0 && (
-                              <div className="overflow-x-auto pt-2">
-                                <table className="w-full text-xs text-left">
-                                  <thead>
-                                    <tr className="border-b border-slate-200 text-slate-500">
-                                      <th className="py-1.5 pr-3 font-medium">Team Member</th>
-                                      <th className="py-1.5 px-3 font-medium text-right">Individual</th>
-                                      <th className="py-1.5 px-3 font-medium text-right">Collaboration</th>
-                                      <th className="py-1.5 pl-3 font-medium">Notes</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-slate-100">
-                                    {sub.contributions.map((c) => (
-                                      <tr key={c.participantId}>
-                                        <td className="py-1.5 pr-3 font-medium text-slate-800">
-                                          {c.fullName}
-                                        </td>
-                                        <td className="py-1.5 px-3 text-right tabular-nums text-slate-900">
-                                          {c.individualScore}%
-                                        </td>
-                                        <td className="py-1.5 px-3 text-right tabular-nums text-slate-900">
-                                          {c.collaborationScore !== null ? `${c.collaborationScore}%` : '—'}
-                                        </td>
-                                        <td className="py-1.5 pl-3 text-slate-600">
-                                          {c.notes || '—'}
-                                        </td>
+                            {team.submission?.contributions &&
+                              team.submission.contributions.length > 0 && (
+                                <div className="overflow-x-auto pt-1">
+                                  <table className="w-full text-xs">
+                                    <thead>
+                                      <tr className="text-left text-slate-500 border-b border-slate-100">
+                                        <th className="py-1.5 pr-4 font-medium">Member</th>
+                                        <th className="py-1.5 px-3 text-right font-medium">
+                                          Individual Score
+                                        </th>
+                                        <th className="py-1.5 px-3 text-right font-medium">
+                                          Collaboration
+                                        </th>
+                                        <th className="py-1.5 pl-3 font-medium">Notes</th>
                                       </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            )}
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                      {team.submission.contributions.map((c) => (
+                                        <tr key={c.participantId}>
+                                          <td className="py-1.5 pr-4 font-medium text-slate-800">
+                                            {c.fullName}
+                                          </td>
+                                          <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                                            {c.individualScore}%
+                                          </td>
+                                          <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                                            {c.collaborationScore !== null
+                                              ? `${c.collaborationScore}%`
+                                              : '—'}
+                                          </td>
+                                          <td className="py-1.5 pl-3 text-slate-600">
+                                            {c.notes || '—'}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
                           </div>
                         );
                       })}
                     </div>
                   )}
-                </div>
+                </section>
               ) : (
-                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                  <div className="px-6 py-4 border-b border-slate-200">
-                    <h4 className="text-sm font-semibold text-slate-900">
-                      Individual Deliverables & Participant Feedback
+                <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+                    <h4 className="text-base font-semibold text-slate-900">
+                      Individual Submissions & Facilitator Feedback
                     </h4>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Evaluated project scores update the Project & Task Completion indicator automatically.
-                    </p>
+                    <span className="text-xs font-mono tabular-nums text-slate-500">
+                      {detail.participants.length} learners
+                    </span>
                   </div>
 
                   {detail.participants.length === 0 ? (
                     <div className="p-8 text-center text-sm text-slate-500">
-                      No cohort participants found for this project scope.
+                      No eligible cohort participants found for this project.
                     </div>
                   ) : (
                     <div className="overflow-x-auto">
-                      <table className="w-full text-sm text-left">
+                      <table className="w-full text-sm">
                         <thead>
-                          <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                            <th className="px-5 py-3">Participant</th>
-                            <th className="px-4 py-3">Status</th>
-                            <th className="px-4 py-3">Deliverable</th>
-                            <th className="px-4 py-3 text-right">Score</th>
-                            <th className="px-4 py-3">Feedback</th>
-                            <th className="px-5 py-3 text-right">Actions</th>
+                          <tr className="border-b border-slate-200 bg-slate-50/70 text-left text-xs font-medium text-slate-500">
+                            <th className="py-3 px-6">Participant</th>
+                            <th className="py-3 px-4">Status</th>
+                            <th className="py-3 px-4">Deliverable & Feedback</th>
+                            <th className="py-3 px-4 text-right">Score</th>
+                            <th className="py-3 px-6 text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {detail.participants.map((p) => {
-                            const sub = p.submission;
-                            const statusInfo = STATUS_LABELS[sub?.status ?? 'not_started'];
+                            const statusKey = p.submission?.status ?? 'not_started';
+                            const statusMeta =
+                              STATUS_LABELS[statusKey] ?? STATUS_LABELS.not_started;
                             return (
-                              <tr key={p.participantId} className="hover:bg-slate-50/60">
-                                <td className="px-5 py-3.5">
+                              <tr key={p.participantId} className="hover:bg-slate-50/60 align-top">
+                                <td className="py-3.5 px-6">
                                   <p className="font-medium text-slate-900">{p.fullName}</p>
-                                  <p className="text-xs text-slate-500 font-mono">
+                                  <p className="text-xs font-mono text-slate-500">
                                     {p.participantCode}
                                   </p>
                                 </td>
-                                <td className="px-4 py-3.5">
-                                  <span className={`text-xs font-medium ${statusInfo.color}`}>
-                                    {statusInfo.label}
+                                <td className="py-3.5 px-4 whitespace-nowrap">
+                                  <span className={`text-xs font-medium ${statusMeta.color}`}>
+                                    {statusMeta.label}
                                   </span>
                                 </td>
-                                <td className="px-4 py-3.5">
-                                  {isSafeHttpUrl(sub?.submissionUrl) ? (
+                                <td className="py-3.5 px-4 text-xs space-y-1 max-w-xs">
+                                  {isSafeHttpUrl(p.submission?.submissionUrl) ? (
                                     <a
-                                      href={sub!.submissionUrl!}
+                                      href={p.submission.submissionUrl}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      className="inline-flex items-center gap-1 text-xs font-medium text-[#B5121B] hover:underline"
+                                      className="inline-flex items-center gap-1 text-[#B5121B] hover:text-[#8F0E15] font-medium underline underline-offset-2 break-all"
                                     >
-                                      <ExternalLink className="w-3.5 h-3.5" />
-                                      View Link
+                                      <span>Open Deliverable</span>
+                                      <ExternalLink className="w-3 h-3 shrink-0" />
                                     </a>
                                   ) : (
-                                    <span className="text-xs text-slate-400">Not submitted</span>
+                                    <span className="text-slate-400">No link submitted</span>
+                                  )}
+                                  {p.submission?.feedback && (
+                                    <p className="text-slate-600 leading-relaxed">
+                                      <span className="font-semibold text-slate-800">
+                                        Feedback:{' '}
+                                      </span>
+                                      {p.submission.feedback}
+                                    </p>
                                   )}
                                 </td>
-                                <td className="px-4 py-3.5 text-right tabular-nums font-medium text-slate-900">
-                                  {sub?.qualityScore !== null && sub?.qualityScore !== undefined
-                                    ? `${sub.qualityScore} / ${detail.project.maxScore}`
+                                <td className="py-3.5 px-4 text-right font-mono tabular-nums text-slate-900 whitespace-nowrap">
+                                  {p.submission?.qualityScore !== null &&
+                                  p.submission?.qualityScore !== undefined
+                                    ? `${p.submission.qualityScore}/${detail.project.maxScore}`
                                     : '—'}
                                 </td>
-                                <td className="px-4 py-3.5 max-w-[240px]">
-                                  <p className="text-xs text-slate-600 line-clamp-2">
-                                    {sub?.feedback || '—'}
-                                  </p>
-                                </td>
-                                <td className="px-5 py-3.5 text-right">
+                                <td className="py-3.5 px-6 text-right whitespace-nowrap">
                                   <div className="inline-flex items-center gap-2">
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        openSubmitModal({
+                                      onClick={() => {
+                                        setSubmitTarget({
+                                          type: 'participant',
+                                          id: p.participantId,
                                           label: p.fullName,
-                                          participantId: p.participantId,
-                                          existingUrl: sub?.submissionUrl ?? '',
-                                        })
-                                      }
-                                      className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 cursor-pointer whitespace-nowrap shrink-0"
+                                          existingUrl: p.submission?.submissionUrl ?? '',
+                                          existingStatus:
+                                            p.submission?.status === 'in_progress'
+                                              ? 'in_progress'
+                                              : 'submitted',
+                                        });
+                                        setSubmissionUrl(p.submission?.submissionUrl ?? '');
+                                        setSubmissionStatus('submitted');
+                                      }}
+                                      className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
                                     >
-                                      {sub?.submissionUrl ? 'Edit Link' : 'Submit'}
+                                      Submit
                                     </button>
                                     {isStaff && (
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          openEvaluateModal({
-                                            label: p.fullName,
-                                            participantId: p.participantId,
-                                            existing: sub,
-                                          })
+                                          openEvaluationModal(
+                                            'participant',
+                                            p.participantId,
+                                            p.fullName,
+                                            p.submission
+                                          )
                                         }
-                                        className="px-2.5 py-1.5 text-xs font-medium text-white bg-[#B5121B] rounded-md hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap shrink-0"
+                                        className="px-2.5 py-1.5 rounded-lg bg-[#B5121B] text-white text-xs font-semibold hover:bg-[#8F0E15] cursor-pointer whitespace-nowrap"
                                       >
                                         Evaluate
                                       </button>
@@ -1010,43 +1005,44 @@ export function ProjectsPage() {
                       </table>
                     </div>
                   )}
-                </div>
+                </section>
               )}
             </>
           )}
-        </section>
+        </div>
       </div>
 
       {/* Create Project Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="bg-white rounded-xl border border-slate-200 max-w-xl w-full max-h-[90vh] overflow-y-auto shadow-xl">
+        <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-xl my-8 overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-base font-semibold text-slate-900">Create STEM Project</h3>
               <button
                 type="button"
                 onClick={() => setShowCreateModal(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <form onSubmit={handleCreateProject} className="p-6 space-y-4">
+            <form onSubmit={handleCreateProject} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">Programme</label>
                   <select
                     required
-                    value={projProgrammeId}
+                    value={formProgrammeId}
                     onChange={(e) => {
-                      const pid = e.target.value;
-                      setProjProgrammeId(pid);
-                      const cs = lookups.cohorts.filter((c) => c.programmeId === pid);
-                      setProjCohortId(cs[0]?.id ?? '');
-                      setProjTrackId('');
+                      const nextProg = e.target.value;
+                      setFormProgrammeId(nextProg);
+                      const nextCohort =
+                        lookups.cohorts.find((c) => c.programmeId === nextProg)?.id ?? '';
+                      setFormCohortId(nextCohort);
+                      setFormTrackId('');
                     }}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900"
                   >
                     {lookups.programmes.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -1059,15 +1055,19 @@ export function ProjectsPage() {
                   <label className="block text-xs font-medium text-slate-700 mb-1">Cohort</label>
                   <select
                     required
-                    value={projCohortId}
-                    onChange={(e) => setProjCohortId(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                    value={formCohortId}
+                    onChange={(e) => setFormCohortId(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900"
                   >
-                    {cohortsForFormProgramme.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
+                    {formCohorts.length === 0 ? (
+                      <option value="">No cohorts available</option>
+                    ) : (
+                      formCohorts.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
               </div>
@@ -1078,12 +1078,12 @@ export function ProjectsPage() {
                     STEM Track (Optional)
                   </label>
                   <select
-                    value={projTrackId}
-                    onChange={(e) => setProjTrackId(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                    value={formTrackId}
+                    onChange={(e) => setFormTrackId(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900"
                   >
                     <option value="">All Tracks</option>
-                    {tracksForFormProgramme.map((t) => (
+                    {formTracks.map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name}
                       </option>
@@ -1097,9 +1097,9 @@ export function ProjectsPage() {
                     min="1"
                     max="1000"
                     required
-                    value={projMaxScore}
-                    onChange={(e) => setProjMaxScore(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                    value={formMaxScore}
+                    onChange={(e) => setFormMaxScore(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums"
                   />
                 </div>
                 <div>
@@ -1107,24 +1107,56 @@ export function ProjectsPage() {
                   <input
                     type="date"
                     required
-                    value={projDeadline}
-                    onChange={(e) => setProjDeadline(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg tabular-nums focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                    value={formDeadline}
+                    onChange={(e) => setFormDeadline(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Project Title</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Project Title
+                </label>
                 <input
                   type="text"
                   required
                   minLength={3}
-                  value={projTitle}
-                  onChange={(e) => setProjTitle(e.target.value)}
-                  placeholder="e.g., Smart Solar Irrigation Controller Prototype"
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                  value={formTitle}
+                  onChange={(e) => setFormTitle(e.target.value)}
+                  placeholder="e.g., Smart Solar Water Quality Monitor"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Project Mode
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setFormIsTeam(false)}
+                    className={`py-2 px-3 rounded-lg border text-xs font-semibold cursor-pointer ${
+                      !formIsTeam
+                        ? 'border-[#B5121B] bg-red-50/50 text-[#8F0E15]'
+                        : 'border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    Individual Project
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFormIsTeam(true)}
+                    className={`py-2 px-3 rounded-lg border text-xs font-semibold cursor-pointer ${
+                      formIsTeam
+                        ? 'border-[#B5121B] bg-red-50/50 text-[#8F0E15]'
+                        : 'border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    Team Project (with Collaboration Scoring)
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -1132,11 +1164,10 @@ export function ProjectsPage() {
                 <textarea
                   rows={2}
                   required
-                  minLength={3}
-                  value={projObjectives}
-                  onChange={(e) => setProjObjectives(e.target.value)}
-                  placeholder="Describe the engineering problem and technical outcomes."
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                  value={formObjectives}
+                  onChange={(e) => setFormObjectives(e.target.value)}
+                  placeholder="Define technical and learning objectives..."
+                  className="w-full p-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
 
@@ -1147,91 +1178,82 @@ export function ProjectsPage() {
                 <textarea
                   rows={2}
                   required
-                  minLength={3}
-                  value={projDeliverables}
-                  onChange={(e) => setProjDeliverables(e.target.value)}
-                  placeholder="e.g., GitHub repository, circuit diagram PDF, and 3-minute demo video link."
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B5121B]/25 focus:border-[#B5121B]"
+                  value={formDeliverables}
+                  onChange={(e) => setFormDeliverables(e.target.value)}
+                  placeholder="e.g., GitHub repository link, circuit schematic, and 5-minute demo video"
+                  className="w-full p-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
 
-              <label className="flex items-center gap-2.5 text-sm text-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={projIsTeam}
-                  onChange={(e) => setProjIsTeam(e.target.checked)}
-                  className="rounded border-slate-300 text-[#B5121B] focus:ring-[#B5121B]"
-                />
-                <span>Team-based STEM project (enables team formation & collaboration scoring)</span>
-              </label>
-
               {/* Dynamic Milestones */}
-              <div className="space-y-2 pt-2 border-t border-slate-100">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">Milestones</span>
+                  <label className="text-xs font-medium text-slate-700">Milestones</label>
                   <button
                     type="button"
                     onClick={() =>
-                      setProjMilestones((prev) => [...prev, { title: '', dueDate: '' }])
+                      setFormMilestones((prev) => [...prev, { title: '', dueDate: '' }])
                     }
-                    className="text-xs font-medium text-[#B5121B] hover:underline cursor-pointer"
+                    className="text-xs font-semibold text-[#B5121B] hover:text-[#8F0E15] cursor-pointer"
                   >
                     + Add Milestone
                   </button>
                 </div>
-                {projMilestones.map((m, idx) => (
+                {formMilestones.map((m, idx) => (
                   <div key={idx} className="flex items-center gap-2">
                     <input
                       type="text"
                       value={m.title}
                       onChange={(e) =>
-                        setProjMilestones((prev) =>
-                          prev.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item))
+                        setFormMilestones((prev) =>
+                          prev.map((item, i) =>
+                            i === idx ? { ...item, title: e.target.value } : item
+                          )
                         )
                       }
-                      placeholder="Milestone description"
-                      className="flex-1 px-3 py-1.5 text-sm border border-slate-300 rounded-lg"
+                      placeholder="Milestone title"
+                      className="flex-1 h-9 px-3 rounded-lg border border-slate-200 text-xs"
                     />
                     <input
                       type="date"
                       value={m.dueDate}
                       onChange={(e) =>
-                        setProjMilestones((prev) =>
+                        setFormMilestones((prev) =>
                           prev.map((item, i) =>
                             i === idx ? { ...item, dueDate: e.target.value } : item
                           )
                         )
                       }
-                      className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg tabular-nums"
+                      className="h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono"
                     />
                     <button
                       type="button"
                       onClick={() =>
-                        setProjMilestones((prev) => prev.filter((_, i) => i !== idx))
+                        setFormMilestones((prev) => prev.filter((_, i) => i !== idx))
                       }
-                      className="p-1.5 text-slate-400 hover:text-[#B5121B] cursor-pointer"
                       aria-label="Remove milestone"
+                      className="p-2 text-slate-400 hover:text-rose-600 cursor-pointer"
                     >
-                      <X className="w-4 h-4" />
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 ))}
               </div>
 
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-200">
+              <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer whitespace-nowrap"
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={savingProject || !projCohortId}
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                  disabled={submittingForm || !formCohortId}
+                  className="px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                 >
-                  {savingProject ? 'Creating...' : 'Create Project'}
+                  {submittingForm ? 'Creating...' : 'Create Project'}
                 </button>
               </div>
             </form>
@@ -1239,16 +1261,16 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {/* Team Creation Modal */}
+      {/* Create Team Modal */}
       {showTeamModal && detail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="bg-white rounded-xl border border-slate-200 max-w-md w-full shadow-xl">
+        <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-base font-semibold text-slate-900">Create Project Team</h3>
               <button
                 type="button"
                 onClick={() => setShowTeamModal(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
@@ -1260,37 +1282,37 @@ export function ProjectsPage() {
                 <input
                   type="text"
                   required
-                  minLength={2}
                   value={teamName}
                   onChange={(e) => setTeamName(e.target.value)}
-                  placeholder="e.g., Team Alpha Robotics"
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  placeholder="e.g., Team Quantum"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                  Select Cohort Members ({selectedTeamMembers.length} selected)
+                  Select Cohort Participants ({teamMemberIds.length} selected)
                 </label>
-                <div className="border border-slate-200 rounded-lg max-h-56 overflow-y-auto divide-y divide-slate-100">
+                <div className="max-h-52 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
                   {detail.allEligibleLearners.map((learner) => {
-                    const checked = selectedTeamMembers.includes(learner.id);
+                    const checked = teamMemberIds.includes(learner.id);
                     return (
                       <label
                         key={learner.id}
-                        className="flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer"
+                        className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-slate-50 cursor-pointer"
                       >
                         <input
                           type="checkbox"
                           checked={checked}
                           onChange={() =>
-                            setSelectedTeamMembers((prev) =>
+                            setTeamMemberIds((prev) =>
                               checked ? prev.filter((id) => id !== learner.id) : [...prev, learner.id]
                             )
                           }
-                          className="rounded border-slate-300 text-[#B5121B]"
+                          className="accent-[#B5121B]"
                         />
-                        <span className="font-medium text-slate-800">{learner.fullName}</span>
-                        <span className="text-xs text-slate-400 font-mono ml-auto">
+                        <span className="font-medium text-slate-900">{learner.fullName}</span>
+                        <span className="font-mono text-slate-400 ml-auto">
                           {learner.participantCode}
                         </span>
                       </label>
@@ -1298,20 +1320,21 @@ export function ProjectsPage() {
                   })}
                 </div>
               </div>
-              <div className="flex items-center justify-end gap-2.5 pt-2">
+
+              <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setShowTeamModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={savingTeam || selectedTeamMembers.length === 0}
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
+                  disabled={submittingForm || teamMemberIds.length === 0}
+                  className="px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                 >
-                  {savingTeam ? 'Saving...' : 'Create Team'}
+                  {submittingForm ? 'Saving...' : 'Create Team'}
                 </button>
               </div>
             </form>
@@ -1319,18 +1342,18 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {/* Deliverable Submission Modal */}
+      {/* Submit Deliverable Modal */}
       {submitTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="bg-white rounded-xl border border-slate-200 max-w-md w-full shadow-xl">
+        <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-base font-semibold text-slate-900">
-                Submit Deliverable · {submitTarget.label}
+                Submit Deliverable — {submitTarget.label}
               </h3>
               <button
                 type="button"
                 onClick={() => setSubmitTarget(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
@@ -1339,46 +1362,48 @@ export function ProjectsPage() {
             <form onSubmit={handleSubmitDeliverable} className="p-6 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Deliverable URL (https://...)
+                  Deliverable Link (https://)
                 </label>
                 <input
                   type="url"
                   required
                   value={submissionUrl}
                   onChange={(e) => setSubmissionUrl(e.target.value)}
-                  placeholder="https://github.com/cci-stem/project-repo"
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  placeholder="https://github.com/team/stem-project"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
+
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Submission State
+                  Submission Status
                 </label>
                 <select
                   value={submissionStatus}
                   onChange={(e) =>
                     setSubmissionStatus(e.target.value as 'in_progress' | 'submitted')
                   }
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm"
                 >
                   <option value="submitted">Submitted for Evaluation</option>
-                  <option value="in_progress">Work In Progress</option>
+                  <option value="in_progress">Work in Progress</option>
                 </select>
               </div>
-              <div className="flex items-center justify-end gap-2.5 pt-2">
+
+              <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setSubmitTarget(null)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={savingSubmission}
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
+                  disabled={submittingForm}
+                  className="px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                 >
-                  {savingSubmission ? 'Saving...' : 'Save Deliverable'}
+                  {submittingForm ? 'Saving...' : 'Save Submission'}
                 </button>
               </div>
             </form>
@@ -1386,29 +1411,27 @@ export function ProjectsPage() {
         </div>
       )}
 
-      {/* Evaluation & Participant Feedback Modal */}
+      {/* Evaluate & Participant Feedback Modal */}
       {evalTarget && detail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="bg-white rounded-xl border border-slate-200 max-w-xl w-full max-h-[90vh] overflow-y-auto shadow-xl">
+        <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xl w-full max-w-xl my-8 overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-semibold text-slate-900">
-                  Evaluate & Provide Feedback · {evalTarget.label}
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Maximum score: {detail.project.maxScore} points
-                </p>
-              </div>
+              <h3 className="text-base font-semibold text-slate-900">
+                Evaluate & Give Feedback — {evalTarget.label}
+              </h3>
               <button
                 type="button"
                 onClick={() => setEvalTarget(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer"
                 aria-label="Close modal"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <form onSubmit={handleSaveEvaluation} className="p-6 space-y-4">
+            <form
+              onSubmit={handleEvaluateSubmit}
+              className="p-6 space-y-4 max-h-[80vh] overflow-y-auto"
+            >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -1419,9 +1442,9 @@ export function ProjectsPage() {
                     onChange={(e) =>
                       setEvalStatus(e.target.value as 'evaluated' | 'revision_requested')
                     }
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm"
                   >
-                    <option value="evaluated">Evaluated (Finalized)</option>
+                    <option value="evaluated">Evaluated (Finalised)</option>
                     <option value="revision_requested">Revision Requested</option>
                   </select>
                 </div>
@@ -1431,133 +1454,113 @@ export function ProjectsPage() {
                   </label>
                   <input
                     type="number"
+                    step="0.5"
                     min="0"
                     max={detail.project.maxScore}
-                    step="0.5"
                     required={evalStatus === 'evaluated'}
                     value={evalScore}
                     onChange={(e) => setEvalScore(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg tabular-nums"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-200 text-sm font-mono tabular-nums"
                   />
                 </div>
               </div>
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Structured Facilitator Feedback
+                  Structured Participant Feedback
                 </label>
                 <textarea
                   rows={3}
                   value={evalFeedback}
                   onChange={(e) => setEvalFeedback(e.target.value)}
-                  placeholder="Highlight strengths, technical quality, and concrete recommendations for growth..."
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                  placeholder="Provide strengths, technical observations, and actionable recommendations..."
+                  className="w-full p-3 rounded-lg border border-slate-200 text-sm"
                 />
               </div>
 
-              {evalTarget.members && evalTarget.members.length > 0 && (
-                <div className="pt-3 border-t border-slate-200 space-y-3">
-                  <div>
-                    <h4 className="text-xs font-semibold text-slate-900">
-                      Individual & Collaboration Scores (0 – 100%)
-                    </h4>
-                    <p className="text-xs text-slate-500">
-                      Feeds directly into each participant&apos;s Project Completion and Collaboration & Problem-Solving indicators.
-                    </p>
-                  </div>
-                  <div className="space-y-3">
-                    {evalTarget.members.map((m) => {
-                      const entry = evalContributions[m.participantId] ?? {
-                        individualScore: '80',
-                        collaborationScore: '80',
-                        notes: '',
-                      };
-                      return (
-                        <div
-                          key={m.participantId}
-                          className="p-3 bg-slate-50 rounded-lg border border-slate-200/80 space-y-2"
-                        >
-                          <p className="text-xs font-semibold text-slate-900">{m.fullName}</p>
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                            <div>
-                              <label className="block text-[11px] text-slate-600 mb-0.5">
-                                Individual (%)
-                              </label>
-                              <input
-                                type="number"
-                                min="0"
-                                max="100"
-                                required
-                                value={entry.individualScore}
-                                onChange={(e) =>
-                                  setEvalContributions((prev) => ({
-                                    ...prev,
-                                    [m.participantId]: { ...entry, individualScore: e.target.value },
-                                  }))
-                                }
-                                className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md tabular-nums"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-slate-600 mb-0.5">
-                                Collaboration (%)
-                              </label>
-                              <input
-                                type="number"
-                                min="0"
-                                max="100"
-                                value={entry.collaborationScore}
-                                onChange={(e) =>
-                                  setEvalContributions((prev) => ({
-                                    ...prev,
-                                    [m.participantId]: {
-                                      ...entry,
-                                      collaborationScore: e.target.value,
-                                    },
-                                  }))
-                                }
-                                className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md tabular-nums"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-slate-600 mb-0.5">
-                                Role / Note
-                              </label>
-                              <input
-                                type="text"
-                                value={entry.notes}
-                                onChange={(e) =>
-                                  setEvalContributions((prev) => ({
-                                    ...prev,
-                                    [m.participantId]: { ...entry, notes: e.target.value },
-                                  }))
-                                }
-                                placeholder="e.g., Firmware lead"
-                                className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+              {evalTarget.type === 'team' && evalContribs.length > 0 && (
+                <div className="space-y-3 pt-2 border-t border-slate-100">
+                  <p className="text-xs font-semibold text-slate-900">
+                    Individual & Collaboration Contributions (0–100%)
+                  </p>
+                  {evalContribs.map((c, idx) => (
+                    <div
+                      key={c.participantId}
+                      className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center py-2 border-b border-slate-100 last:border-b-0"
+                    >
+                      <span className="sm:col-span-4 text-xs font-medium text-slate-800 truncate">
+                        {c.fullName}
+                      </span>
+                      <div className="sm:col-span-2">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={c.individualScore}
+                          onChange={(e) =>
+                            setEvalContribs((prev) =>
+                              prev.map((item, i) =>
+                                i === idx ? { ...item, individualScore: e.target.value } : item
+                              )
+                            )
+                          }
+                          aria-label={`Individual score for ${c.fullName}`}
+                          placeholder="Ind %"
+                          className="w-full h-9 px-2 rounded-lg border border-slate-200 text-xs font-mono tabular-nums"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={c.collaborationScore}
+                          onChange={(e) =>
+                            setEvalContribs((prev) =>
+                              prev.map((item, i) =>
+                                i === idx ? { ...item, collaborationScore: e.target.value } : item
+                              )
+                            )
+                          }
+                          aria-label={`Collaboration score for ${c.fullName}`}
+                          placeholder="Collab %"
+                          className="w-full h-9 px-2 rounded-lg border border-slate-200 text-xs font-mono tabular-nums"
+                        />
+                      </div>
+                      <div className="sm:col-span-4">
+                        <input
+                          type="text"
+                          value={c.notes}
+                          onChange={(e) =>
+                            setEvalContribs((prev) =>
+                              prev.map((item, i) =>
+                                i === idx ? { ...item, notes: e.target.value } : item
+                              )
+                            )
+                          }
+                          placeholder="Contribution note"
+                          className="w-full h-9 px-2.5 rounded-lg border border-slate-200 text-xs"
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-200">
+              <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
                   onClick={() => setEvalTarget(null)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={savingEval}
-                  className="px-4 py-2 text-sm font-medium text-white bg-[#B5121B] rounded-lg hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
+                  disabled={submittingForm}
+                  className="px-4 py-2 rounded-lg bg-[#B5121B] text-white text-sm font-semibold hover:bg-[#8F0E15] disabled:opacity-50 cursor-pointer"
                 >
-                  {savingEval ? 'Saving...' : 'Save Evaluation'}
+                  {submittingForm ? 'Saving...' : 'Save Evaluation'}
                 </button>
               </div>
             </form>

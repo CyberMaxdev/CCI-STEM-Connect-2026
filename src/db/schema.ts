@@ -110,44 +110,17 @@ export const users = pgTable(
   'users',
   {
     id: uuid('id').defaultRandom().primaryKey(),
-    uid: text('uid').notNull().unique(), // Firebase Auth UID or local email:<uuid>
+    uid: text('uid').notNull().unique(), // Firebase Auth UID or pending:<email>
     email: text('email').notNull().unique(),
     fullName: text('full_name').notNull(),
     avatarUrl: text('avatar_url'),
     role: appRoleEnum('role').notNull().default('participant'),
-    passwordHash: text('password_hash'),
-    authProvider: text('auth_provider').notNull().default('google'),
-    requestedRole: appRoleEnum('requested_role'),
-    approvalStatus: text('approval_status').notNull().default('approved'),
     isActive: boolean('is_active').notNull().default(true),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }).defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('idx_users_role').on(table.role)]
-);
-
-export const userInvitations = pgTable(
-  'user_invitations',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    email: text('email').notNull(),
-    fullName: text('full_name'),
-    role: appRoleEnum('role').notNull(),
-    codeHash: text('code_hash').notNull().unique(),
-    codePrefix: text('code_prefix').notNull(),
-    invitedBy: uuid('invited_by')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    usedAt: timestamp('used_at', { withTimezone: true }),
-    usedBy: uuid('used_by').references(() => users.id, { onDelete: 'set null' }),
-    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  },
-  (table) => [
-    index('idx_user_invitations_email').on(table.email),
-    index('idx_user_invitations_used').on(table.usedAt),
-  ]
 );
 
 // ==========================================

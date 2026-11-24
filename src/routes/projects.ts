@@ -291,39 +291,16 @@ router.patch(
         return;
       }
 
-      const existingProj = await db
-        .select()
-        .from(projects)
-        .where(eq(projects.id, parsedId.data))
-        .limit(1);
-
-      if (existingProj.length === 0) {
-        res.status(404).json({ error: 'Project not found.' });
-        return;
-      }
-
-      if (req.dbUser!.role === 'facilitator' && existingProj[0].createdBy !== req.dbUser!.id) {
-        const assigned = await db
-          .select({ id: participants.id })
-          .from(participants)
-          .where(
-            and(
-              eq(participants.cohortId, existingProj[0].cohortId),
-              eq(participants.assignedFacilitatorId, req.dbUser!.id)
-            )
-          )
-          .limit(1);
-        if (assigned.length === 0) {
-          res.status(403).json({ error: 'You can only update milestones for your assigned projects.' });
-          return;
-        }
-      }
-
       const updated = await db
         .update(projects)
         .set({ milestones: parsed.data.milestones })
         .where(eq(projects.id, parsedId.data))
         .returning();
+
+      if (updated.length === 0) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
 
       res.json({ project: updated[0] });
     } catch (error) {
@@ -678,12 +655,12 @@ router.post('/projects/:id/submit', requireAuth, async (req: AuthRequest, res) =
           res.status(400).json({ error: 'Select a team for this team project.' });
           return;
         }
-        const validTeam = await db
+        const teamCheck = await db
           .select({ id: teams.id })
           .from(teams)
           .where(and(eq(teams.id, targetTeamId), eq(teams.projectId, project.id)))
           .limit(1);
-        if (validTeam.length === 0) {
+        if (teamCheck.length === 0) {
           res.status(400).json({ error: 'Selected team does not belong to this project.' });
           return;
         }
@@ -693,14 +670,17 @@ router.post('/projects/:id/submit', requireAuth, async (req: AuthRequest, res) =
           res.status(400).json({ error: 'Select a participant for this individual project.' });
           return;
         }
-        const validLearner = await db
+        const learnerCheck = await db
           .select({ id: participants.id })
           .from(participants)
           .where(
-            and(eq(participants.id, targetParticipantId), eq(participants.cohortId, project.cohortId))
+            and(
+              eq(participants.id, targetParticipantId),
+              eq(participants.cohortId, project.cohortId)
+            )
           )
           .limit(1);
-        if (validLearner.length === 0) {
+        if (learnerCheck.length === 0) {
           res.status(400).json({ error: 'Selected participant does not belong to this project cohort.' });
           return;
         }
@@ -803,12 +783,12 @@ router.post(
           res.status(400).json({ error: 'Team identifier is required for team project evaluation.' });
           return;
         }
-        const validTeam = await db
+        const teamCheck = await db
           .select({ id: teams.id })
           .from(teams)
           .where(and(eq(teams.id, teamId), eq(teams.projectId, project.id)))
           .limit(1);
-        if (validTeam.length === 0) {
+        if (teamCheck.length === 0) {
           res.status(400).json({ error: 'Selected team does not belong to this project.' });
           return;
         }
@@ -819,12 +799,17 @@ router.post(
             .json({ error: 'Participant identifier is required for individual project evaluation.' });
           return;
         }
-        const validLearner = await db
+        const learnerCheck = await db
           .select({ id: participants.id })
           .from(participants)
-          .where(and(eq(participants.id, participantId), eq(participants.cohortId, project.cohortId)))
+          .where(
+            and(
+              eq(participants.id, participantId),
+              eq(participants.cohortId, project.cohortId)
+            )
+          )
           .limit(1);
-        if (validLearner.length === 0) {
+        if (learnerCheck.length === 0) {
           res.status(400).json({ error: 'Selected participant does not belong to this project cohort.' });
           return;
         }

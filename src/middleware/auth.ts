@@ -1,15 +1,20 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
-import { verifySessionToken } from '../lib/auth-security.ts';
-import {
-  type AppRole,
-  type PublicUser,
-  getUserById,
-  syncAuthenticatedUser,
-} from '../db/users.ts';
+import { type AppRole, syncAuthenticatedUser } from '../db/users.ts';
 
-export type DbUser = PublicUser;
+export interface DbUser {
+  id: string;
+  uid: string;
+  email: string;
+  fullName: string;
+  avatarUrl: string | null;
+  role: AppRole;
+  isActive: boolean;
+  lastLoginAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
 export interface AuthRequest extends Request {
   firebaseUser?: DecodedIdToken;
@@ -29,41 +34,12 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     return;
   }
 
-  // 1. Server-issued HMAC session token (Email & Password Sign Up / Sign In)
-  if (token.startsWith('cci1.')) {
-    try {
-      const payload = verifySessionToken(token);
-      if (!payload) {
-        res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
-        return;
-      }
-
-      const dbUser = await getUserById(payload.sub);
-      if (!dbUser) {
-        res.status(401).json({ error: 'Account not found. Please sign in again.' });
-        return;
-      }
-
-      if (!dbUser.isActive) {
-        res.status(403).json({ error: 'Your account has been deactivated by an administrator.' });
-        return;
-      }
-
-      req.dbUser = dbUser;
-      next();
-      return;
-    } catch (error) {
-      console.error('Session authentication error:', error);
-      res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
-      return;
-    }
-  }
-
-  // 2. Firebase ID token (Google OAuth Sign-In)
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     if (!decoded.email) {
-      res.status(403).json({ error: 'An account email address is required to access this platform.' });
+      res
+        .status(403)
+        .json({ error: 'An account email address is required to access this platform.' });
       return;
     }
 

@@ -1,24 +1,18 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+  updateProfile,
+} from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
-import { apiFetch, getSessionToken, publicApiFetch, setSessionToken } from '../lib/api';
+import { apiFetch } from '../lib/api';
 import type { RoleMetadata, UserProfile } from '../types';
 
-export interface EmailSignUpInput {
-  fullName: string;
-  email: string;
-  password: string;
-  selectedRole: 'programme_manager' | 'facilitator' | 'participant';
-  inviteCode?: string;
-}
-
-interface AuthSessionResponse {
-  token: string;
-  user: UserProfile;
-  roleMetadata: RoleMetadata | null;
-  linkedParticipant: { id: string } | null;
-  pendingRoleApproval?: boolean;
-}
+export type SignUpRole = 'programme_manager' | 'facilitator' | 'participant';
 
 interface AuthContextValue {
   user: UserProfile | null;
@@ -27,15 +21,45 @@ interface AuthContextValue {
   loading: boolean;
   signingIn: boolean;
   error: string | null;
-  clearError: () => void;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
-  signUpWithEmail: (input: EmailSignUpInput) => Promise<void>;
+  signUpWithEmail: (params: {
+    fullName: string;
+    email: string;
+    password: string;
+    role: SignUpRole;
+  }) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<boolean>;
+  clearError: () => void;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+function mapFirebaseAuthError(err: unknown): string {
+  const code = (err as { code?: string })?.code;
+  switch (code) {
+    case 'auth/popup-closed-by-user':
+      return 'Sign-in popup was closed before completing authentication.';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists. Please sign in instead.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/weak-password':
+      return 'Password must be at least 6 characters long.';
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Incorrect email or password. Please check your credentials and try again.';
+    case 'auth/too-many-requests':
+      return 'Too many failed attempts. Please wait a few minutes or reset your password.';
+    case 'auth/operation-not-allowed':
+      return 'Email & Password sign-in is not enabled in Firebase Authentication settings.';
+    default:
+      return err instanceof Error ? err.message : 'Authentication failed. Please try again.';
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -44,8 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const clearError = useCallback(() => setError(null), []);
+  const isRegisteringRef = useRef(false);
 
   const loadBackendProfile = useCallback(async () => {
     try {
@@ -60,7 +83,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLinkedParticipantId(res.linkedParticipant?.id ?? null);
     } catch (err) {
       console.error('Failed to synchronize profile:', err);
-      setSessionToken(null);
       setUser(null);
       setRoleMetadata(null);
       setLinkedParticipantId(null);
@@ -70,18 +92,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (isRegisteringRef.current) {
+        return;
+      }
+
       if (!firebaseUser) {
-        if (!getSessionToken()) {
-          setUser(null);
-          setRoleMetadata(null);
-          setLinkedParticipantId(null);
-        }
+        setUser(null);
+        setRoleMetadata(null);
+        setLinkedParticipantId(null);
         setLoading(false);
         return;
       }
 
-      // Firebase Google session takes precedence when Firebase user signs in
-      setSessionToken(null);
       await loadBackendProfile();
       setLoading(false);
     });
@@ -93,71 +115,93 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setSigningIn(true);
       setError(null);
-      setSessionToken(null);
       await signInWithPopup(auth, googleAuthProvider);
       await loadBackendProfile();
     } catch (err) {
-      const code = (err as { code?: string })?.code;
-      if (code === 'auth/popup-closed-by-user') {
-        setError('Sign-in popup was closed before completing authentication.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Authentication failed. Please try again.');
-      }
+      setError(mapFirebaseAuthError(err));
     } finally {
       setSigningIn(false);
     }
   }, [loadBackendProfile]);
 
-  const signInWithEmail = useCallback(async (email: string, password: string) => {
+  const signInWithEmail = useCallback(
+    async (email: string, password: string) => {
+      try {
+        setSigningIn(true);
+        setError(null);
+        await signInWithEmailAndPassword(auth, email.trim(), password);
+        await loadBackendProfile();
+      } catch (err) {
+        setError(mapFirebaseAuthError(err));
+      } finally {
+        setSigningIn(false);
+      }
+    },
+    [loadBackendProfile]
+  );
+
+  const signUpWithEmail = useCallback(
+    async ({
+      fullName,
+      email,
+      password,
+      role,
+    }: {
+      fullName: string;
+      email: string;
+      password: string;
+      role: SignUpRole;
+    }) => {
+      isRegisteringRef.current = true;
+      try {
+        setSigningIn(true);
+        setError(null);
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        await updateProfile(cred.user, { displayName: fullName.trim() });
+        await cred.user.getIdToken(true);
+
+        const res = await apiFetch<{
+          user: UserProfile;
+          roleMetadata: RoleMetadata | null;
+          linkedParticipant: { id: string } | null;
+        }>('/api/auth/register-profile', {
+          method: 'POST',
+          body: { fullName: fullName.trim(), role },
+        });
+
+        setUser(res.user);
+        setRoleMetadata(res.roleMetadata);
+        setLinkedParticipantId(res.linkedParticipant?.id ?? null);
+        setLoading(false);
+      } catch (err) {
+        setError(mapFirebaseAuthError(err));
+      } finally {
+        isRegisteringRef.current = false;
+        setSigningIn(false);
+      }
+    },
+    []
+  );
+
+  const sendPasswordReset = useCallback(async (email: string) => {
     try {
       setSigningIn(true);
       setError(null);
-      const res = await publicApiFetch<AuthSessionResponse>('/api/auth/signin', {
-        method: 'POST',
-        body: { email, password },
-      });
-      if (auth.currentUser) {
-        await firebaseSignOut(auth);
-      }
-      setSessionToken(res.token);
-      setUser(res.user);
-      setRoleMetadata(res.roleMetadata);
-      setLinkedParticipantId(res.linkedParticipant?.id ?? null);
+      await sendPasswordResetEmail(auth, email.trim());
+      return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
+      setError(mapFirebaseAuthError(err));
+      return false;
     } finally {
       setSigningIn(false);
     }
   }, []);
 
-  const signUpWithEmail = useCallback(async (input: EmailSignUpInput) => {
-    try {
-      setSigningIn(true);
-      setError(null);
-      const res = await publicApiFetch<AuthSessionResponse>('/api/auth/signup', {
-        method: 'POST',
-        body: input,
-      });
-      if (auth.currentUser) {
-        await firebaseSignOut(auth);
-      }
-      setSessionToken(res.token);
-      setUser(res.user);
-      setRoleMetadata(res.roleMetadata);
-      setLinkedParticipantId(res.linkedParticipant?.id ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Account registration failed. Please try again.');
-    } finally {
-      setSigningIn(false);
-    }
-  }, []);
+  const clearError = useCallback(() => setError(null), []);
 
   const signOut = useCallback(async () => {
     try {
-      setSessionToken(null);
-      if (auth.currentUser) {
-        await firebaseSignOut(auth);
-      }
+      await firebaseSignOut(auth);
       setUser(null);
       setRoleMetadata(null);
       setLinkedParticipantId(null);
@@ -176,10 +220,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         signingIn,
         error,
-        clearError,
         signInWithGoogle,
         signInWithEmail,
         signUpWithEmail,
+        sendPasswordReset,
+        clearError,
         signOut,
         refreshProfile: loadBackendProfile,
       }}
