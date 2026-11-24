@@ -1,8 +1,24 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getSessionToken, publicApiFetch, setSessionToken } from '../lib/api';
 import type { RoleMetadata, UserProfile } from '../types';
+
+export interface EmailSignUpInput {
+  fullName: string;
+  email: string;
+  password: string;
+  selectedRole: 'programme_manager' | 'facilitator' | 'participant';
+  inviteCode?: string;
+}
+
+interface AuthSessionResponse {
+  token: string;
+  user: UserProfile;
+  roleMetadata: RoleMetadata | null;
+  linkedParticipant: { id: string } | null;
+  pendingRoleApproval?: boolean;
+}
 
 interface AuthContextValue {
   user: UserProfile | null;
@@ -11,7 +27,10 @@ interface AuthContextValue {
   loading: boolean;
   signingIn: boolean;
   error: string | null;
+  clearError: () => void;
   signInWithGoogle: () => Promise<void>;
+  signInWithEmail: (email: string, password: string) => Promise<void>;
+  signUpWithEmail: (input: EmailSignUpInput) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -26,6 +45,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const clearError = useCallback(() => setError(null), []);
+
   const loadBackendProfile = useCallback(async () => {
     try {
       setError(null);
@@ -39,6 +60,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLinkedParticipantId(res.linkedParticipant?.id ?? null);
     } catch (err) {
       console.error('Failed to synchronize profile:', err);
+      setSessionToken(null);
       setUser(null);
       setRoleMetadata(null);
       setLinkedParticipantId(null);
@@ -49,13 +71,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (!firebaseUser) {
-        setUser(null);
-        setRoleMetadata(null);
-        setLinkedParticipantId(null);
+        if (!getSessionToken()) {
+          setUser(null);
+          setRoleMetadata(null);
+          setLinkedParticipantId(null);
+        }
         setLoading(false);
         return;
       }
 
+      // Firebase Google session takes precedence when Firebase user signs in
+      setSessionToken(null);
       await loadBackendProfile();
       setLoading(false);
     });
@@ -67,6 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setSigningIn(true);
       setError(null);
+      setSessionToken(null);
       await signInWithPopup(auth, googleAuthProvider);
       await loadBackendProfile();
     } catch (err) {
@@ -81,9 +108,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [loadBackendProfile]);
 
+  const signInWithEmail = useCallback(async (email: string, password: string) => {
+    try {
+      setSigningIn(true);
+      setError(null);
+      const res = await publicApiFetch<AuthSessionResponse>('/api/auth/signin', {
+        method: 'POST',
+        body: { email, password },
+      });
+      if (auth.currentUser) {
+        await firebaseSignOut(auth);
+      }
+      setSessionToken(res.token);
+      setUser(res.user);
+      setRoleMetadata(res.roleMetadata);
+      setLinkedParticipantId(res.linkedParticipant?.id ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign-in failed. Please try again.');
+    } finally {
+      setSigningIn(false);
+    }
+  }, []);
+
+  const signUpWithEmail = useCallback(async (input: EmailSignUpInput) => {
+    try {
+      setSigningIn(true);
+      setError(null);
+      const res = await publicApiFetch<AuthSessionResponse>('/api/auth/signup', {
+        method: 'POST',
+        body: input,
+      });
+      if (auth.currentUser) {
+        await firebaseSignOut(auth);
+      }
+      setSessionToken(res.token);
+      setUser(res.user);
+      setRoleMetadata(res.roleMetadata);
+      setLinkedParticipantId(res.linkedParticipant?.id ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Account registration failed. Please try again.');
+    } finally {
+      setSigningIn(false);
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     try {
-      await firebaseSignOut(auth);
+      setSessionToken(null);
+      if (auth.currentUser) {
+        await firebaseSignOut(auth);
+      }
       setUser(null);
       setRoleMetadata(null);
       setLinkedParticipantId(null);
@@ -102,7 +176,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         signingIn,
         error,
+        clearError,
         signInWithGoogle,
+        signInWithEmail,
+        signUpWithEmail,
         signOut,
         refreshProfile: loadBackendProfile,
       }}

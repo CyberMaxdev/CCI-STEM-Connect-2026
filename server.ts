@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import authRouter from './src/routes/auth.ts';
 import usersRouter from './src/routes/users.ts';
 import dashboardRouter from './src/routes/dashboard.ts';
 import programmesRouter from './src/routes/programmes.ts';
@@ -21,6 +22,7 @@ async function startServer() {
   app.use(express.json({ limit: '2mb' }));
 
   // Mount API routes
+  app.use('/api', authRouter);
   app.use('/api', usersRouter);
   app.use('/api', dashboardRouter);
   app.use('/api', programmesRouter);

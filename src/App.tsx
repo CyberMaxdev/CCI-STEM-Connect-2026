@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { Layout } from './components/Layout';
 import { SignInView } from './components/SignInView';
@@ -15,6 +15,10 @@ import type { NavSection } from './types';
 function AppShell() {
   const { user, loading } = useAuth();
   const [activeSection, setActiveSection] = useState<NavSection>('dashboard');
+
+  useEffect(() => {
+    setActiveSection('dashboard');
+  }, [user?.id]);
 
   if (loading) {
     return (

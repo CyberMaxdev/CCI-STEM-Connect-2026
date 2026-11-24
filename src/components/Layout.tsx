@@ -5,6 +5,7 @@ import {
   BookOpen,
   CalendarCheck,
   ClipboardCheck,
+  Clock,
   FileSpreadsheet,
   FolderKanban,
   Gauge,
@@ -133,7 +134,7 @@ export function Layout({
   headerAction,
   children,
 }: LayoutProps) {
-  const { user, signOut } = useAuth();
+  const { user, signOut, refreshProfile } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   if (!user) return null;
@@ -306,6 +307,26 @@ export function Layout({
         </header>
 
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 max-w-[1440px] w-full mx-auto">
+          {user.approvalStatus === 'pending_approval' && user.requestedRole && (
+            <div className="mb-6 p-3.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-950 text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start sm:items-center gap-2.5">
+                <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5 sm:mt-0" />
+                <span>
+                  Your request for{' '}
+                  <strong className="font-semibold">{ROLE_LABELS[user.requestedRole]}</strong>{' '}
+                  access is pending Super Administrator approval. You currently have Participant
+                  access.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={refreshProfile}
+                className="h-8 px-3 rounded-md border border-amber-300 bg-white text-amber-900 text-xs font-semibold hover:bg-amber-100/70 transition-colors cursor-pointer whitespace-nowrap self-start sm:self-auto"
+              >
+                Check Approval Status
+              </button>
+            </div>
+          )}
           {children}
         </main>
       </div>

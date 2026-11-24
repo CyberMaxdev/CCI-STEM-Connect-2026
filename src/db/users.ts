@@ -1,12 +1,62 @@
-import { and, asc, count, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, isNull, sql } from 'drizzle-orm';
 import { db } from './index.ts';
-import { participants, roles, users } from './schema.ts';
+import { participants, roles, userInvitations, users } from './schema.ts';
 
 export type AppRole = 'super_admin' | 'programme_manager' | 'facilitator' | 'participant';
 
+export interface PublicUser {
+  id: string;
+  uid: string;
+  email: string;
+  fullName: string;
+  avatarUrl: string | null;
+  role: AppRole;
+  authProvider: string;
+  requestedRole: AppRole | null;
+  approvalStatus: string;
+  isActive: boolean;
+  lastLoginAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 const INITIAL_SUPER_ADMIN_EMAIL = 'maxdevconsult@gmail.com';
 
-async function linkParticipantByEmailIfUnlinked(userId: string, normalizedEmail: string) {
+const PUBLIC_USER_SELECT = {
+  id: users.id,
+  uid: users.uid,
+  email: users.email,
+  fullName: users.fullName,
+  avatarUrl: users.avatarUrl,
+  role: users.role,
+  authProvider: users.authProvider,
+  requestedRole: users.requestedRole,
+  approvalStatus: users.approvalStatus,
+  isActive: users.isActive,
+  lastLoginAt: users.lastLoginAt,
+  createdAt: users.createdAt,
+  updatedAt: users.updatedAt,
+};
+
+export function sanitizeUser(row: typeof users.$inferSelect): PublicUser {
+  return {
+    id: row.id,
+    uid: row.uid,
+    email: row.email,
+    fullName: row.fullName,
+    avatarUrl: row.avatarUrl,
+    role: row.role,
+    authProvider: row.authProvider,
+    requestedRole: row.requestedRole,
+    approvalStatus: row.approvalStatus,
+    isActive: row.isActive,
+    lastLoginAt: row.lastLoginAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export async function linkParticipantByEmailIfUnlinked(userId: string, normalizedEmail: string) {
   const alreadyLinked = await db
     .select({ id: participants.id })
     .from(participants)
@@ -34,17 +84,37 @@ async function linkParticipantByEmailIfUnlinked(userId: string, normalizedEmail:
   }
 }
 
+export async function getUserById(userId: string): Promise<PublicUser | null> {
+  const rows = await db
+    .select(PUBLIC_USER_SELECT)
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function findUserByEmailWithAuth(email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  const rows = await db
+    .select()
+    .from(users)
+    .where(sql`LOWER(${users.email}) = ${normalizedEmail}`)
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function syncAuthenticatedUser(params: {
   uid: string;
   email: string;
   fullName?: string;
   avatarUrl?: string;
-}) {
+}): Promise<PublicUser> {
   try {
     const normalizedEmail = params.email.trim().toLowerCase();
     const displayName =
       params.fullName?.trim() || normalizedEmail.split('@')[0] || 'Platform User';
 
+    // 1. Check existing account by Firebase UID
     const existingByUid = await db
       .select()
       .from(users)
@@ -64,15 +134,56 @@ export async function syncAuthenticatedUser(params: {
         .where(eq(users.uid, params.uid))
         .returning();
       await linkParticipantByEmailIfUnlinked(updated[0].id, normalizedEmail);
-      return updated[0];
+      return sanitizeUser(updated[0]);
     }
 
-    // Determine initial role: platform owner email or very first user becomes super_admin
+    // 2. Check existing account by email (e.g. created via email/password or Super Admin)
+    const existingByEmail = await findUserByEmailWithAuth(normalizedEmail);
+    if (existingByEmail) {
+      const nextProvider = existingByEmail.passwordHash ? 'both' : 'google';
+      const updated = await db
+        .update(users)
+        .set({
+          uid: params.uid,
+          authProvider: nextProvider,
+          avatarUrl: params.avatarUrl ?? existingByEmail.avatarUrl,
+          lastLoginAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, existingByEmail.id))
+        .returning();
+      await linkParticipantByEmailIfUnlinked(updated[0].id, normalizedEmail);
+      return sanitizeUser(updated[0]);
+    }
+
+    // 3. Determine initial role for brand new Google account
     const [{ totalUsers }] = await db.select({ totalUsers: count() }).from(users);
     const shouldBeSuperAdmin =
       normalizedEmail === INITIAL_SUPER_ADMIN_EMAIL || Number(totalUsers) === 0;
 
-    const initialRole: AppRole = shouldBeSuperAdmin ? 'super_admin' : 'participant';
+    let initialRole: AppRole = shouldBeSuperAdmin ? 'super_admin' : 'participant';
+    let matchedInvitationId: string | null = null;
+
+    if (!shouldBeSuperAdmin) {
+      const now = new Date();
+      const [invite] = await db
+        .select()
+        .from(userInvitations)
+        .where(
+          and(
+            sql`LOWER(${userInvitations.email}) = ${normalizedEmail}`,
+            isNull(userInvitations.usedAt),
+            gt(userInvitations.expiresAt, now)
+          )
+        )
+        .orderBy(desc(userInvitations.createdAt))
+        .limit(1);
+
+      if (invite) {
+        initialRole = invite.role;
+        matchedInvitationId = invite.id;
+      }
+    }
 
     // Concurrent-safe upsert by uid
     const inserted = await db
@@ -83,6 +194,8 @@ export async function syncAuthenticatedUser(params: {
         fullName: displayName,
         avatarUrl: params.avatarUrl ?? null,
         role: initialRole,
+        authProvider: 'google',
+        approvalStatus: 'approved',
         isActive: true,
         lastLoginAt: new Date(),
       })
@@ -96,28 +209,25 @@ export async function syncAuthenticatedUser(params: {
       })
       .returning();
 
+    if (matchedInvitationId) {
+      await db
+        .update(userInvitations)
+        .set({ usedAt: new Date(), usedBy: inserted[0].id })
+        .where(and(eq(userInvitations.id, matchedInvitationId), isNull(userInvitations.usedAt)));
+    }
+
     await linkParticipantByEmailIfUnlinked(inserted[0].id, normalizedEmail);
-    return inserted[0];
+    return sanitizeUser(inserted[0]);
   } catch (error) {
     console.error('Failed to sync authenticated user:', error);
     throw new Error('Unable to synchronize user account. Please try again.', { cause: error });
   }
 }
 
-export async function getAllUsers() {
+export async function getAllUsers(): Promise<PublicUser[]> {
   try {
     return await db
-      .select({
-        id: users.id,
-        uid: users.uid,
-        email: users.email,
-        fullName: users.fullName,
-        avatarUrl: users.avatarUrl,
-        role: users.role,
-        isActive: users.isActive,
-        lastLoginAt: users.lastLoginAt,
-        createdAt: users.createdAt,
-      })
+      .select(PUBLIC_USER_SELECT)
       .from(users)
       .orderBy(asc(users.fullName));
   } catch (error) {
@@ -135,28 +245,74 @@ export async function getAllRoles() {
   }
 }
 
-export async function updateUserRoleById(userId: string, newRole: AppRole) {
+export async function updateUserRoleById(userId: string, newRole: AppRole): Promise<PublicUser | null> {
   try {
     const updated = await db
       .update(users)
-      .set({ role: newRole, updatedAt: new Date() })
+      .set({
+        role: newRole,
+        requestedRole: null,
+        approvalStatus: 'approved',
+        updatedAt: new Date(),
+      })
       .where(eq(users.id, userId))
       .returning();
-    return updated[0] ?? null;
+    return updated[0] ? sanitizeUser(updated[0]) : null;
   } catch (error) {
     console.error('Failed to update user role:', error);
     throw new Error('Unable to update user role.', { cause: error });
   }
 }
 
-export async function updateUserActiveStatus(userId: string, isActive: boolean) {
+export async function resolveUserRoleApproval(
+  userId: string,
+  decision: 'approve' | 'reject'
+): Promise<PublicUser | null> {
+  try {
+    const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!existing) return null;
+
+    if (decision === 'approve') {
+      const targetRole = existing.requestedRole ?? existing.role;
+      const updated = await db
+        .update(users)
+        .set({
+          role: targetRole,
+          requestedRole: null,
+          approvalStatus: 'approved',
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, userId))
+        .returning();
+      return updated[0] ? sanitizeUser(updated[0]) : null;
+    }
+
+    const updated = await db
+      .update(users)
+      .set({
+        approvalStatus: 'rejected',
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, userId))
+      .returning();
+    return updated[0] ? sanitizeUser(updated[0]) : null;
+  } catch (error) {
+    console.error('Failed to resolve role approval:', error);
+    throw new Error('Unable to update role approval status.', { cause: error });
+  }
+}
+
+export async function updateUserActiveStatus(
+  userId: string,
+  isActive: boolean
+): Promise<PublicUser | null> {
   try {
     const updated = await db
       .update(users)
       .set({ isActive, updatedAt: new Date() })
       .where(eq(users.id, userId))
       .returning();
-    return updated[0] ?? null;
+    return updated[0] ? sanitizeUser(updated[0]) : null;
   } catch (error) {
     console.error('Failed to update user active status:', error);
     throw new Error('Unable to update user account status.', { cause: error });

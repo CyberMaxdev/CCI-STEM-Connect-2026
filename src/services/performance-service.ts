@@ -12,6 +12,7 @@ import {
   projectSubmissions,
   scoringConfigurations,
   scoringThresholds,
+  sessions,
   stemTracks,
   teamContributions,
   teamMembers,
@@ -115,6 +116,8 @@ export interface ComputePerformanceParams {
   participantId?: string;
   facilitatorUserId?: string;
   participantUserId?: string;
+  periodStart?: string;
+  periodEnd?: string;
 }
 
 export async function computeProgrammePerformanceReport(
@@ -184,6 +187,7 @@ export async function computeProgrammePerformanceReport(
 
   const [
     attendanceRows,
+    sessionRows,
     assessmentRows,
     resultRows,
     projectRows,
@@ -200,6 +204,10 @@ export async function computeProgrammePerformanceReport(
           inArray(attendanceRecords.participantId, participantIds)
         )
       ),
+    db
+      .select({ id: sessions.id, sessionDate: sessions.sessionDate })
+      .from(sessions)
+      .where(eq(sessions.programmeId, programme.id)),
     db.select().from(assessments).where(eq(assessments.programmeId, programme.id)),
     db
       .select()
@@ -217,12 +225,27 @@ export async function computeProgrammePerformanceReport(
       .where(inArray(teamContributions.participantId, participantIds)),
   ]);
 
+  const sessionDateMap = new Map(sessionRows.map((s) => [s.id, s.sessionDate]));
+  const inDateRange = (isoDateOrDate: string | Date | null | undefined): boolean => {
+    if (!params.periodStart && !params.periodEnd) return true;
+    if (!isoDateOrDate) return true;
+    const dStr =
+      isoDateOrDate instanceof Date
+        ? isoDateOrDate.toISOString().slice(0, 10)
+        : String(isoDateOrDate).slice(0, 10);
+    if (params.periodStart && dStr < params.periodStart) return false;
+    if (params.periodEnd && dStr > params.periodEnd) return false;
+    return true;
+  };
+
   const assessmentMap = new Map(assessmentRows.map((a) => [a.id, a]));
   const projectMap = new Map(projectRows.map((p) => [p.id, p]));
 
   // Map attendance by participant
   const attendanceByParticipant = new Map<string, AttendanceEvidence[]>();
   for (const r of attendanceRows) {
+    const sessDate = sessionDateMap.get(r.sessionId);
+    if (!inDateRange(sessDate)) continue;
     const list = attendanceByParticipant.get(r.participantId) ?? [];
     list.push({
       sessionId: r.sessionId,
@@ -237,6 +260,7 @@ export async function computeProgrammePerformanceReport(
   for (const r of resultRows) {
     const ass = assessmentMap.get(r.assessmentId);
     if (!ass) continue;
+    if (!inDateRange(r.gradedAt)) continue;
     const list = assessmentsByParticipant.get(r.participantId) ?? [];
     list.push({
       assessmentId: ass.id,
@@ -270,7 +294,9 @@ export async function computeProgrammePerformanceReport(
     });
   }
 
-  const programmeSubmissions = submissionRows.filter((s) => projectMap.has(s.projectId));
+  const programmeSubmissions = submissionRows.filter(
+    (s) => projectMap.has(s.projectId) && inDateRange(s.evaluatedAt ?? s.submittedAt)
+  );
 
   // Evaluate each participant with the unified pure Performance Measurement Engine
   const evaluatedParticipants: ParticipantPerformanceResult[] = participantRows.map((p) => {

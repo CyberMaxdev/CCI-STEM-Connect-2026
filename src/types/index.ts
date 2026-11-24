@@ -20,8 +20,24 @@ export interface UserProfile {
   fullName: string;
   avatarUrl: string | null;
   role: AppRole;
+  authProvider?: string;
+  requestedRole?: AppRole | null;
+  approvalStatus?: string;
   isActive: boolean;
   lastLoginAt: string | null;
+  createdAt: string;
+}
+
+export interface UserInvitationItem {
+  id: string;
+  email: string;
+  fullName: string | null;
+  role: AppRole;
+  codePrefix: string;
+  invitedBy: string;
+  invitedByName: string | null;
+  expiresAt: string;
+  usedAt: string | null;
   createdAt: string;
 }
 
